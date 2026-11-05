@@ -1,0 +1,826 @@
+<title>Focus Frame Extractor</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one wide column of instrument panels — source, viewer, timeline, export — sized for very wide frames. */
+:root {
+  --bg: #eef0f2;
+  --panel: #ffffff;
+  --ink: #16202a;
+  --muted: #5b6774;
+  --line: #d5dbe1;
+  --well: #e3e7eb;
+  --accent: #0b6e8a;       /* controls, timeline line */
+  --accent-ink: #ffffff;
+  --peak: #e0365a;         /* focus peaking + in-focus selection */
+  --peak-soft: rgba(224, 54, 90, .14);
+  --good: #1d7a4c;
+  --warn: #9a5a00;
+  --chart-grid: #e2e6ea;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f1418; --panel: #172026; --ink: #e4eaef; --muted: #93a1ad; --line: #2a363f; --well: #0b1013;
+  --accent: #4cb6d4; --accent-ink: #06171d; --peak: #ff5c7f; --peak-soft: rgba(255, 92, 127, .16);
+  --good: #5bd296; --warn: #f0b45a; --chart-grid: #24303a; color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #0f1418; --panel: #172026; --ink: #e4eaef; --muted: #93a1ad; --line: #2a363f; --well: #0b1013;
+  --accent: #4cb6d4; --accent-ink: #06171d; --peak: #ff5c7f; --peak-soft: rgba(255, 92, 127, .16);
+  --good: #5bd296; --warn: #f0b45a; --chart-grid: #24303a; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--font-body); }
+.wrap { max-width: 1240px; margin: 0 auto; padding-block: 28px 56px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 18px; }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 24px; }
+h1 { font: 600 30px/1.1 var(--font-display); letter-spacing: -.01em; margin: 0; text-wrap: balance; }
+h1 .reticle { display: inline-block; width: .8em; height: .8em; margin-right: .3em; vertical-align: -.05em;
+  border: 2px solid var(--peak); border-radius: 50%; position: relative; }
+h1 .reticle::after { content: ""; position: absolute; inset: 30%; background: var(--peak); border-radius: 50%; }
+.lede { margin: 6px 0 0; color: var(--muted); max-width: 68ch; }
+.engine { font: 12px var(--font-mono); color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); flex: none; }
+.dot.ok { background: var(--good); } .dot.busy { background: var(--warn); } .dot.err { background: var(--peak); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; display: grid; gap: 14px; min-width: 0; }
+.panel-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; }
+h2 { font: 600 13px/1.2 var(--font-display); text-transform: uppercase; letter-spacing: .08em; margin: 0; color: var(--muted); }
+h2 b { color: var(--ink); font-weight: 600; margin-right: 8px; }
+.hint { color: var(--muted); font-size: 13px; margin: 0; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* Source */
+.drop { border: 1.5px dashed var(--line); border-radius: var(--radius); padding: 18px; display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: center; background: var(--well); cursor: pointer; transition: border-color .15s; }
+.drop:hover, .drop.over { border-color: var(--accent); }
+.drop:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.drop strong { font-weight: 600; }
+.drop .fname { font-family: var(--font-mono); font-size: 13px; color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+.specs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.spec { background: var(--panel); padding: 10px 12px; min-width: 0; }
+.spec dt { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+.spec dd { margin: 2px 0 0; font: 500 15px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.spec dd small { display: block; font: 12px var(--font-body); color: var(--muted); }
+.spec.key dd { color: var(--accent); font-size: 18px; }
+
+/* Buttons + inputs */
+button, .btn { font: 500 14px var(--font-body); border-radius: 5px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 8px 14px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.toggle[aria-pressed="true"] { background: var(--peak-soft); border-color: var(--peak); color: var(--ink); }
+select, input[type=number] { font: 14px var(--font-body); background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 7px 8px; }
+input[type=number] { width: 7.5em; font-family: var(--font-mono); }
+input[type=range] { accent-color: var(--accent); width: 100%; }
+label.field { display: grid; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; min-width: 0; }
+label.check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+label.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+.row { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: end; }
+.row.center { align-items: center; }
+.grow { flex: 1 1 220px; min-width: 0; }
+
+/* Viewer */
+.viewer { background: var(--well); border-radius: var(--radius); display: grid; place-items: center; min-height: 120px; position: relative; overflow: hidden; }
+.viewer canvas { display: block; touch-action: none; }
+.viewer.drawing canvas { cursor: crosshair; }
+.viewer .empty { color: var(--muted); font-size: 14px; padding: 36px 16px; text-align: center; }
+.badge { display: inline-flex; align-items: center; gap: 6px; font: 500 12px var(--font-mono); padding: 3px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.badge.in { border-color: var(--peak); color: var(--peak); background: var(--peak-soft); }
+.scrub { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
+.readout { font: 13px var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Progress */
+.progress { display: grid; gap: 6px; }
+.bar { height: 6px; background: var(--well); border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+.bar.indet i { width: 30%; animation: slide 1.1s infinite ease-in-out; }
+@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .bar.indet i { animation: none; width: 100%; opacity: .5; } }
+.status { font: 13px var(--font-mono); color: var(--muted); overflow-wrap: anywhere; }
+.error { color: var(--peak); white-space: pre-wrap; font: 13px var(--font-mono); margin: 0; }
+
+/* Timeline */
+.chart-box { position: relative; min-width: 0; }
+#chart { width: 100%; height: 220px; display: block; touch-action: none; cursor: crosshair; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.summary div { display: grid; gap: 2px; }
+.summary span { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+.summary b { font: 500 20px var(--font-mono); font-variant-numeric: tabular-nums; }
+.summary b.hl { color: var(--peak); }
+.example-note { font-size: 13px; padding: 8px 12px; border-radius: 5px; background: var(--well); color: var(--muted); }
+.example-note b { color: var(--ink); font-weight: 600; }
+.segments { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+table { border-collapse: collapse; width: 100%; font: 13px var(--font-mono); font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 6px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); font: 600 11px var(--font-body); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+th:first-child, td:first-child { text-align: left; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--peak-soft); }
+.method-note { font-size: 13px; color: var(--muted); max-width: 72ch; margin: 0; }
+details summary { cursor: pointer; font-size: 13px; color: var(--accent); }
+details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 6px; }
+.export-done { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 12px; border: 1px solid var(--peak); border-radius: var(--radius); background: var(--peak-soft); }
+@media (max-width: 560px) {
+  h1 { font-size: 24px; }
+  .scrub { grid-template-columns: 1fr 1fr; }
+  .scrub input[type=range] { grid-column: 1 / -1; grid-row: 1; }
+  #chart { height: 180px; }
+}
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1><span class="reticle" aria-hidden="true"></span>Focus Frame Extractor</h1>
+      <p class="lede">Load a video, measure its frame rate, score every frame for sharpness with grayscale Laplacian or Sobel edge detection, and download only the frames where the subject is in focus. Everything runs in your browser, and the video never leaves your computer.</p>
+    </div>
+    <div class="engine" id="engine"><span class="dot" id="engineDot"></span><span id="engineText">Decoder not loaded</span></div>
+  </header>
+
+  <!-- 1. Source -->
+  <section class="panel" aria-labelledby="h-src">
+    <div class="panel-head"><h2 id="h-src"><b>1</b>Video</h2><p class="hint">AVI, MP4, MOV, MKV and anything else ffmpeg reads, including MPEG-4 Part 2 and MJPEG codecs that browsers can't play</p></div>
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept="video/*,.avi,.mkv,.mov,.mp4,.m4v,.wmv,.flv,.mpg,.mpeg,.ts" hidden>
+      <button class="primary" type="button" id="pick">Choose video…</button>
+      <span><strong>or drop a file here</strong></span>
+      <span class="fname" id="fname">No video loaded</span>
+    </label>
+    <dl class="specs" id="specs" hidden></dl>
+    <div class="progress" id="openProg" hidden><div class="bar indet"><i></i></div><div class="status" id="openStatus"></div></div>
+    <p class="error" id="openErr" hidden></p>
+  </section>
+
+  <!-- 2. Viewer -->
+  <section class="panel" aria-labelledby="h-view">
+    <div class="panel-head"><h2 id="h-view"><b>2</b>Frame viewer</h2>
+      <div class="row center">
+        <button class="toggle" type="button" id="peakBtn" aria-pressed="false" disabled>Focus peaking</button>
+        <button class="toggle" type="button" id="roiBtn" aria-pressed="false" disabled>Draw subject region</button>
+        <button type="button" id="roiClear" disabled>Use whole frame</button>
+      </div>
+    </div>
+    <div class="viewer" id="viewer"><div class="empty" id="viewerEmpty">Load a video to step through its frames.</div><canvas id="frame" hidden></canvas></div>
+    <div class="scrub">
+      <button type="button" id="prevF" aria-label="Previous frame" disabled>◀</button>
+      <input type="range" id="scrub" min="0" max="0" value="0" step="1" aria-label="Frame" disabled>
+      <button type="button" id="nextF" aria-label="Next frame" disabled>▶</button>
+    </div>
+    <div class="row center" style="justify-content: space-between">
+      <span class="readout" id="frameReadout">Frame — · — s</span>
+      <span class="readout" id="roiReadout">Region: whole frame</span>
+      <span class="badge" id="frameBadge">not scored</span>
+    </div>
+  </section>
+
+  <!-- 3. Analysis -->
+  <section class="panel" aria-labelledby="h-an">
+    <div class="panel-head"><h2 id="h-an"><b>3</b>Sharpness analysis</h2></div>
+    <div class="row">
+      <label class="field">Method
+        <select id="metric">
+          <option value="lap">Laplacian (grayscale 2nd derivative)</option>
+          <option value="sob">Sobel edge strength (Tenengrad)</option>
+        </select>
+      </label>
+      <label class="field">Subject size
+        <select id="kfrac">
+          <option value="0.0002">Tiny (top 0.02% of pixels)</option>
+          <option value="0.0005" selected>Small (top 0.05%)</option>
+          <option value="0.002">Medium (top 0.2%)</option>
+          <option value="0.01">Large (top 1%)</option>
+        </select>
+      </label>
+      <label class="check" style="padding-bottom: 8px"><input type="checkbox" id="bgsub" checked> Ignore the static scene (fixed camera)</label>
+      <div class="row" style="margin-left:auto">
+        <button class="primary" type="button" id="analyze" disabled>Analyze all frames</button>
+        <button type="button" id="cancel" hidden>Stop</button>
+      </div>
+    </div>
+    <div class="progress" id="anProg" hidden><div class="bar" id="anBar"><i></i></div><div class="status" id="anStatus"></div></div>
+    <p class="error" id="anErr" hidden></p>
+    <details>
+      <summary>How the score works</summary>
+      <p>Each frame is converted to grayscale. With “Ignore the static scene” on, a median background is built from about 48 evenly spaced keyframes and subtracted, so fixed edges in the scene (a rail, a ledge, a scale bar) don't count. The Laplacian method then measures the second derivative at every pixel, and the Sobel method measures the edge gradient. A sharp subject produces a few very strong responses and a blurred one produces only weak ones, so the score is the mean of the strongest responses, the top fraction set by “Subject size”. The method only changes which column of scores is used, so you can switch methods after analysis without running it again. Changing the region, subject size or background option needs a new analysis.</p>
+    </details>
+  </section>
+
+  <!-- 4. Timeline -->
+  <section class="panel" aria-labelledby="h-tl">
+    <div class="panel-head"><h2 id="h-tl"><b>4</b>Focus timeline</h2>
+      <div class="legend"><span><i style="background: var(--accent)"></i>sharpness score</span><span><i style="background: var(--peak)"></i>in-focus threshold</span><span><i style="background: var(--peak-soft); height: 10px"></i>frames kept</span></div>
+    </div>
+    <div class="example-note" id="exampleNote"><b>Example data.</b> Scores from <span class="mono">Side2025-07-28T16_20_57.avi</span> (9,393 frames at 30 fps). Load a video and run the analysis to replace it with your own.</div>
+    <div class="chart-box"><canvas id="chart" aria-label="Sharpness score for every frame. Click to view a frame; drag the red line to change the threshold."></canvas></div>
+    <div class="row">
+      <label class="field grow">In-focus threshold
+        <input type="range" id="thRange" min="0" max="100" step="0.1" value="20">
+      </label>
+      <label class="field">Score ≥
+        <input type="number" id="thNum" step="0.1" value="20">
+      </label>
+      <button type="button" id="autoTh">Auto threshold</button>
+      <label class="field">Min. run (frames)
+        <input type="number" id="minRun" min="1" step="1" value="1">
+      </label>
+    </div>
+    <div class="summary">
+      <div><span>Frames kept</span><b class="hl" id="sKept">—</b></div>
+      <div><span>Share of video</span><b id="sShare">—</b></div>
+      <div><span>In-focus runs</span><b id="sRuns">—</b></div>
+      <div><span>Kept footage</span><b id="sDur">—</b></div>
+    </div>
+    <div class="segments"><table>
+      <thead><tr><th>Run</th><th>Frames</th><th>Start (s)</th><th>End (s)</th><th>Length</th><th>Peak frame</th><th>Peak score</th></tr></thead>
+      <tbody id="segBody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- 5. Export -->
+  <section class="panel" aria-labelledby="h-ex">
+    <div class="panel-head"><h2 id="h-ex"><b>5</b>Download in-focus frames</h2></div>
+    <div class="row">
+      <label class="field">File
+        <select id="format">
+          <option value="jpg">ZIP of JPEG frames</option>
+          <option value="png">ZIP of PNG frames (lossless)</option>
+          <option value="mp4">MP4 video of kept frames only</option>
+        </select>
+      </label>
+      <label class="check" style="padding-bottom: 8px"><input type="checkbox" id="withCsv" checked> Include scores CSV (ZIP only)</label>
+      <div class="row" style="margin-left:auto">
+        <button type="button" id="csvOnly" disabled>Download scores CSV</button>
+        <button class="primary" type="button" id="build" disabled>Build file</button>
+      </div>
+    </div>
+    <p class="hint" id="exportHint">Analyze a video first. Frames are named by their original frame number and timestamp, for example <span class="mono">frame_000202_t6.733s.jpg</span>.</p>
+    <div class="progress" id="exProg" hidden><div class="bar" id="exBar"><i></i></div><div class="status" id="exStatus"></div></div>
+    <div class="export-done" id="exDone" hidden><span id="exInfo" class="mono"></span><button class="primary" type="button" id="save">Save file</button></div>
+    <p class="error" id="exErr" hidden></p>
+  </section>
+</div>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const EXAMPLE = '__EXAMPLE__';
+
+/* ---------- state ---------- */
+const S = {
+  worker: null, ready: false, file: null, info: null,
+  scores: null,       // {lap, sob, frames, fps, example}
+  metric: 'lap', threshold: 20, minRun: 1,
+  roi: null, analyzedRoi: undefined, bg: null, bgW: 0,
+  idx: 0, kept: null, segments: [],
+  frameImg: null,     // last decoded RGBA ImageData
+  busy: false, exportBlob: null, exportName: '',
+};
+
+function decodeExample() {
+  const bin = atob(EXAMPLE); const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  const u16 = new Uint16Array(u8.buffer); const n = u16.length / 2;
+  const lap = new Float32Array(n), sob = new Float32Array(n);
+  for (let i = 0; i < n; i++) { lap[i] = u16[i] / 10; sob[i] = u16[n + i] / 10; }
+  return { lap, sob, frames: n, fps: 30, example: true };
+}
+
+/* ---------- worker plumbing ---------- */
+let pending = null; // {resolve, reject, type}
+let frameReq = { busy: false, want: null };
+let workerFailed = false;
+
+function setEngine(state, text) { $('engineDot').className = 'dot ' + state; $('engineText').textContent = text; }
+
+function startWorker() {
+  return new Promise((resolve, reject) => {
+    let w;
+    try { w = new Worker(new URL('focus-worker.js', document.baseURI)); }
+    catch (e) { reject(new Error('This browser blocked the background worker that decodes video.')); return; }
+    S.worker = w; S.ready = false;
+    setEngine('busy', 'Loading decoder…');
+    w.onmessage = (ev) => onWorker(ev.data);
+    w.onerror = (e) => { e.preventDefault(); const err = new Error('The decoder failed to start: ' + (e.message || 'unknown error')); failAll(err); reject(err); };
+    pending = { type: 'ready', resolve, reject };
+    w.postMessage({ type: 'init', base: document.baseURI });
+  });
+}
+function failAll(err) {
+  workerFailed = true;
+  setEngine('err', 'Decoder unavailable');
+  if (pending) { const p = pending; pending = null; p.reject(err); }
+}
+function call(msg, type) {
+  return new Promise((resolve, reject) => { pending = { type, resolve, reject }; S.worker.postMessage(msg); });
+}
+function onWorker(m) {
+  if (m.type === 'engine-progress') { setEngine('busy', `Loading decoder… ${Math.round(m.loaded / m.total * 100)}%`); return; }
+  if (m.type === 'progress') { onProgress(m); return; }
+  if (m.type === 'frame') { onFrame(m); return; }
+  if (m.type === 'error' && m.op === 'frame') { frameReq.busy = false; pumpFrame(); return; }
+  if (m.type === 'error' && m.op === 'init') { workerFailed = true; setEngine('err', 'Decoder unavailable'); }
+  if (m.type === 'ready') { S.ready = true; setEngine('ok', 'Decoder ready (ffmpeg, WebAssembly)'); }
+  if (pending && (m.type === pending.type || m.type === 'error')) {
+    const p = pending; pending = null;
+    if (m.type === 'error') p.reject(new Error(m.message)); else p.resolve(m);
+  }
+}
+async function ensureWorker() {
+  if (S.worker && S.ready) return;
+  if (!S.startP) S.startP = startWorker().catch((e) => { S.startP = null; throw e; });
+  await S.startP;
+}
+
+/* ---------- loading a file ---------- */
+const fmtBytes = (b) => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.round(b / 1e3) + ' kB';
+const fmtTime = (s) => { const m = Math.floor(s / 60), r = s - m * 60; return m ? `${m}:${r.toFixed(2).padStart(5, '0')}` : r.toFixed(2) + ' s'; };
+const fmtNum = (n) => n.toLocaleString('en-US');
+const fpsText = (f) => (Math.abs(f - Math.round(f)) < 0.005 ? Math.round(f).toString() : f.toFixed(3));
+
+$('pick').addEventListener('click', (e) => { e.preventDefault(); $('file').click(); });
+$('drop').addEventListener('click', (e) => { if (e.target === $('drop')) $('file').click(); });
+$('file').addEventListener('change', () => { if ($('file').files[0]) openFile($('file').files[0]); });
+['dragenter', 'dragover'].forEach((t) => $('drop').addEventListener(t, (e) => { e.preventDefault(); $('drop').classList.add('over'); }));
+['dragleave', 'drop'].forEach((t) => $('drop').addEventListener(t, (e) => { e.preventDefault(); $('drop').classList.remove('over'); }));
+$('drop').addEventListener('drop', (e) => { const f = e.dataTransfer.files[0]; if (f) openFile(f); });
+
+async function openFile(file) {
+  if (S.busy) return;
+  S.file = file; $('fname').textContent = `${file.name} · ${fmtBytes(file.size)}`;
+  $('openErr').hidden = true; $('openProg').hidden = false;
+  $('openStatus').textContent = S.ready ? 'Reading file…' : 'Downloading the video decoder (about 10 MB, once per visit)…';
+  try {
+    await ensureWorker();
+    $('openStatus').textContent = 'Reading file…';
+    const r = await call({ type: 'open', file }, 'info');
+    S.info = r.info;
+    S.roi = null; S.bg = null; S.analyzedRoi = undefined;
+    renderSpecs();
+    setupViewer();
+    $('analyze').disabled = false;
+    $('openProg').hidden = true;
+  } catch (e) {
+    $('openProg').hidden = true; $('openErr').hidden = false;
+    $('openErr').textContent = e.message + (workerFailed ? '\nIf you are viewing this inside an app that restricts WebAssembly, open the page in a regular desktop browser (Chrome, Edge, Firefox or Safari).' : '');
+  }
+}
+
+function renderSpecs(measured) {
+  const i = S.info; const el = $('specs'); el.hidden = false;
+  const rows = [
+    ['Frame rate', `${fpsText(i.fps)} fps`, i.vfr ? `variable: nominal ${i.rRate}, average ${i.aRate}` : `constant · ${i.rRate} · timebase ${i.timeBase}`, true],
+    ['Frames', fmtNum(measured ? measured.frames : i.frames), measured ? `decoded and counted · ${fpsText(measured.frames / i.duration)} fps measured` : (i.frameCountSource === 'header' ? 'from file header' : 'estimated from duration')],
+    ['Resolution', `${i.width} × ${i.height}`, i.rotation ? `rotated ${i.rotation}°` : `${(i.width * i.height / 1e6).toFixed(2)} MP`],
+    ['Duration', fmtTime(i.duration), `${i.duration.toFixed(3)} s`],
+    ['Codec', i.codecName + (i.tag && i.tag !== '[0][0][0][0]' ? ` (${i.tag})` : ''), `${i.codec} · ${i.pixFmt}`],
+    ['Container', i.container.split(/[(,]/)[0].trim(), i.bitRate ? `${Math.round(i.bitRate / 1000)} kb/s` : fmtBytes(i.size)],
+  ];
+  el.innerHTML = '';
+  for (const [k, v, sub, key] of rows) {
+    const d = document.createElement('div'); d.className = 'spec' + (key ? ' key' : '');
+    const dt = document.createElement('dt'); dt.textContent = k;
+    const dd = document.createElement('dd'); dd.textContent = v;
+    const sm = document.createElement('small'); sm.textContent = sub; dd.appendChild(sm);
+    d.append(dt, dd); el.appendChild(d);
+  }
+}
+
+/* ---------- viewer ---------- */
+const cv = $('frame'), cx = cv.getContext('2d');
+let viewScale = 1;
+
+function setupViewer() {
+  const i = S.info;
+  cv.width = i.width; cv.height = i.height; cv.hidden = false; $('viewerEmpty').hidden = true;
+  layoutCanvas();
+  const total = (S.scores && !S.scores.example) ? S.scores.frames : i.frames;
+  $('scrub').max = Math.max(0, total - 1); $('scrub').disabled = false;
+  ['prevF', 'nextF', 'peakBtn', 'roiBtn', 'roiClear'].forEach((id) => $(id).disabled = false);
+  if (S.scores && S.scores.example && S.scores.frames === i.frames && Math.abs(S.scores.fps - i.fps) < .01) {
+    // Same shape as the example: keep showing the example until analysis replaces it.
+  }
+  goTo(Math.min(S.idx, total - 1) || Math.floor(total / 2));
+  updateRoiReadout();
+}
+function layoutCanvas() {
+  if (!S.info) return;
+  const box = $('viewer').clientWidth;
+  const maxH = Math.max(160, window.innerHeight * 0.55);
+  const w = Math.min(box, maxH * S.info.width / S.info.height);
+  cv.style.width = w + 'px'; cv.style.height = (w * S.info.height / S.info.width) + 'px';
+  viewScale = w / S.info.width;
+}
+window.addEventListener('resize', () => { layoutCanvas(); drawChart(); });
+
+function goTo(i) {
+  if (!S.info) { S.idx = i; drawChart(); updateBadge(); return; }
+  const max = +$('scrub').max;
+  S.idx = Math.max(0, Math.min(max, Math.round(i)));
+  $('scrub').value = S.idx;
+  $('frameReadout').textContent = `Frame ${fmtNum(S.idx)} · ${(S.idx / S.info.fps).toFixed(3)} s`;
+  updateBadge(); drawChart();
+  frameReq.want = S.idx; pumpFrame();
+}
+function pumpFrame() {
+  if (frameReq.busy || frameReq.want == null || !S.ready || S.busy) return;
+  const index = frameReq.want; frameReq.want = null; frameReq.busy = true;
+  S.worker.postMessage({ type: 'frame', index, id: index });
+}
+function onFrame(m) {
+  frameReq.busy = false;
+  S.frameImg = new ImageData(new Uint8ClampedArray(m.rgba.buffer), m.width, m.height);
+  S.frameIdx = m.index;
+  paintFrame();
+  pumpFrame();
+}
+function paintFrame() {
+  if (!S.frameImg) return;
+  const img = S.frameImg;
+  if ($('peakBtn').getAttribute('aria-pressed') === 'true') {
+    const out = new ImageData(new Uint8ClampedArray(img.data), img.width, img.height);
+    peaking(out); cx.putImageData(out, 0, 0);
+  } else cx.putImageData(img, 0, 0);
+  drawRoi();
+}
+// Focus peaking: highlight pixels whose Laplacian (after background removal) is strong.
+function peaking(img) {
+  const W = img.width, H = img.height, d = img.data, N = W * H;
+  const g = new Int16Array(N);
+  const bg = S.bg && S.bgW === W ? S.bg : null;
+  for (let p = 0, q = 0; p < N; p++, q += 4) {
+    const y = (d[q] * 77 + d[q + 1] * 150 + d[q + 2] * 29) >> 8;
+    g[p] = bg ? y - bg[p] : y;
+  }
+  const col = getComputedStyle(document.documentElement).getPropertyValue('--peak').trim() || '#e0365a';
+  const c = parseInt(col.slice(1), 16), R = c >> 16, G = (c >> 8) & 255, B = c & 255;
+  const lim = bg ? 10 : 18;
+  for (let y = 1; y < H - 1; y++) for (let x = 1, p = y * W + 1; x < W - 1; x++, p++) {
+    let l = g[p - 1] + g[p + 1] + g[p - W] + g[p + W] - 4 * g[p]; if (l < 0) l = -l;
+    if (l > lim) { const a = Math.min(1, (l - lim) / 20), q = p * 4; d[q] += (R - d[q]) * a; d[q + 1] += (G - d[q + 1]) * a; d[q + 2] += (B - d[q + 2]) * a; }
+  }
+}
+$('scrub').addEventListener('input', () => goTo(+$('scrub').value));
+$('prevF').addEventListener('click', () => goTo(S.idx - 1));
+$('nextF').addEventListener('click', () => goTo(S.idx + 1));
+$('peakBtn').addEventListener('click', () => { const b = $('peakBtn'); b.setAttribute('aria-pressed', b.getAttribute('aria-pressed') === 'true' ? 'false' : 'true'); paintFrame(); });
+document.addEventListener('keydown', (e) => {
+  if (!S.info || /INPUT|SELECT|TEXTAREA|BUTTON/.test(document.activeElement.tagName)) return;
+  if (e.key === 'ArrowRight') { goTo(S.idx + 1); e.preventDefault(); }
+  if (e.key === 'ArrowLeft') { goTo(S.idx - 1); e.preventDefault(); }
+});
+
+/* Region of interest drawing */
+let drag = null;
+$('roiBtn').addEventListener('click', () => {
+  const on = $('roiBtn').getAttribute('aria-pressed') !== 'true';
+  $('roiBtn').setAttribute('aria-pressed', on); $('viewer').classList.toggle('drawing', on);
+});
+$('roiClear').addEventListener('click', () => { S.roi = null; updateRoiReadout(); paintFrame(); });
+const toImg = (e) => { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width * cv.width, y: (e.clientY - r.top) / r.height * cv.height }; };
+cv.addEventListener('pointerdown', (e) => {
+  if ($('roiBtn').getAttribute('aria-pressed') !== 'true') return;
+  cv.setPointerCapture(e.pointerId); drag = toImg(e);
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!drag) return; const p = toImg(e);
+  S.roi = normRoi(drag, p); paintFrame();
+});
+cv.addEventListener('pointerup', (e) => {
+  if (!drag) return; const p = toImg(e);
+  const r = normRoi(drag, p); drag = null;
+  S.roi = r.w >= 8 && r.h >= 8 ? r : null;
+  $('roiBtn').setAttribute('aria-pressed', 'false'); $('viewer').classList.remove('drawing');
+  updateRoiReadout(); paintFrame();
+});
+function normRoi(a, b) {
+  const W = S.info.width, H = S.info.height;
+  const x = Math.max(0, Math.min(a.x, b.x)), y = Math.max(0, Math.min(a.y, b.y));
+  const x2 = Math.min(W, Math.max(a.x, b.x)), y2 = Math.min(H, Math.max(a.y, b.y));
+  return { x: Math.round(x), y: Math.round(y), w: Math.round(x2 - x), h: Math.round(y2 - y) };
+}
+function drawRoi() {
+  if (!S.roi) return;
+  const r = S.roi;
+  cx.save();
+  cx.fillStyle = 'rgba(0,0,0,.35)';
+  cx.fillRect(0, 0, cv.width, r.y); cx.fillRect(0, r.y + r.h, cv.width, cv.height - r.y - r.h);
+  cx.fillRect(0, r.y, r.x, r.h); cx.fillRect(r.x + r.w, r.y, cv.width - r.x - r.w, r.h);
+  cx.strokeStyle = '#ffd34d'; cx.lineWidth = Math.max(1.5, 2 / viewScale); cx.setLineDash([8 / viewScale, 5 / viewScale]);
+  cx.strokeRect(r.x + .5, r.y + .5, r.w, r.h);
+  cx.restore();
+}
+function updateRoiReadout() {
+  const r = S.roi;
+  const changed = S.analyzedRoi !== undefined && JSON.stringify(S.analyzedRoi) !== JSON.stringify(r);
+  $('roiReadout').textContent = (r ? `Region: ${r.w}×${r.h} at (${r.x}, ${r.y})` : 'Region: whole frame') + (changed ? ' · re-analyze to apply' : '');
+}
+
+/* ---------- analysis ---------- */
+$('analyze').addEventListener('click', runAnalysis);
+$('cancel').addEventListener('click', cancelWork);
+
+async function runAnalysis() {
+  if (!S.info || S.busy) return;
+  S.busy = true; setBusyUi(true);
+  $('anErr').hidden = true; $('anProg').hidden = false; $('anBar').className = 'bar indet'; $('anStatus').textContent = 'Building background model from keyframes…';
+  const roi = S.roi ? { ...S.roi } : null;
+  try {
+    const r = await call({ type: 'analyze', roi, bgSub: $('bgsub').checked, kFrac: +$('kfrac').value }, 'scores');
+    S.scores = { lap: r.lap, sob: r.sob, frames: r.frames, fps: S.info.fps, example: false };
+    S.bg = r.bg; S.bgW = S.info.width; S.analyzedRoi = roi;
+    $('exampleNote').hidden = true;
+    renderSpecs({ frames: r.frames });
+    $('scrub').max = r.frames - 1;
+    $('anBar').className = 'bar'; $('anBar').firstElementChild.style.width = '100%';
+    $('anStatus').textContent = `Scored ${fmtNum(r.frames)} frames in ${r.seconds.toFixed(1)} s` + (r.bgCount ? ` · background from ${r.bgCount} keyframes` : '');
+    autoThreshold();
+    updateRoiReadout();
+    $('build').disabled = false; $('csvOnly').disabled = false;
+    $('exportHint').textContent = 'Frames are named by their original frame number and timestamp, for example frame_000202_t6.733s.jpg.';
+  } catch (e) {
+    if (e.message !== 'cancelled') { $('anErr').hidden = false; $('anErr').textContent = e.message; }
+    $('anProg').hidden = true;
+  } finally { S.busy = false; setBusyUi(false); pumpFrame(); }
+}
+function setBusyUi(b) {
+  $('analyze').disabled = b || !S.info; $('build').disabled = b || !S.scores || S.scores.example;
+  $('cancel').hidden = !b; $('pick').disabled = b; $('file').disabled = b;
+}
+let progT0 = 0;
+function onProgress(m) {
+  if (m.phase === 'background') { $('anStatus').textContent = `Building background model… ${m.done} keyframes read`; return; }
+  if (m.phase === 'score') {
+    $('anBar').className = 'bar';
+    const f = Math.min(1, m.done / Math.max(1, m.total));
+    $('anBar').firstElementChild.style.width = (f * 100).toFixed(1) + '%';
+    const rate = m.done / Math.max(.01, m.elapsed);
+    const eta = (m.total - m.done) / Math.max(1, rate);
+    $('anStatus').textContent = `Scoring frame ${fmtNum(m.done)} of ${fmtNum(m.total)} · ${Math.round(rate)} frames/s · about ${Math.max(0, Math.ceil(eta))} s left`;
+    return;
+  }
+  if (m.phase === 'export' || m.phase === 'zip') {
+    const f = Math.min(1, m.done / Math.max(1, m.total));
+    $('exBar').className = 'bar'; $('exBar').firstElementChild.style.width = (f * 100).toFixed(1) + '%';
+    $('exStatus').textContent = m.phase === 'zip' ? `Packing ${fmtNum(m.done)} of ${fmtNum(m.total)} frames…` : `Extracting frame ${fmtNum(m.done)} of ${fmtNum(m.total)}…`;
+  }
+}
+async function cancelWork() {
+  if (!S.worker) return;
+  S.worker.terminate(); S.worker = null; S.ready = false; S.startP = null;
+  if (pending) { const p = pending; pending = null; p.reject(new Error('cancelled')); }
+  $('anProg').hidden = true; $('exProg').hidden = true;
+  frameReq.busy = false;
+  try { await ensureWorker(); await call({ type: 'open', file: S.file }, 'info'); pumpFrame(); }
+  catch (e) { $('openErr').hidden = false; $('openErr').textContent = e.message; }
+}
+
+/* ---------- threshold + selection ---------- */
+const series = () => S.scores[S.metric];
+
+function otsu(arr) {
+  let lo = Infinity, hi = -Infinity;
+  const L = new Float32Array(arr.length);
+  for (let i = 0; i < arr.length; i++) { const v = Math.log(Math.max(arr[i], 1e-3)); L[i] = v; if (v < lo) lo = v; if (v > hi) hi = v; }
+  const B = 256, h = new Float64Array(B), span = hi - lo || 1;
+  for (const v of L) h[Math.min(B - 1, Math.floor((v - lo) / span * B))]++;
+  let total = 0, sumAll = 0; for (let i = 0; i < B; i++) { total += h[i]; sumAll += h[i] * (i + .5); }
+  let w0 = 0, s0 = 0, best = -1, bi = B / 2;
+  for (let i = 0; i < B - 1; i++) {
+    w0 += h[i]; s0 += h[i] * (i + .5); const w1 = total - w0; if (!w0 || !w1) continue;
+    const m0 = s0 / w0, m1 = (sumAll - s0) / w1, v = w0 * w1 * (m0 - m1) ** 2;
+    if (v > best) { best = v; bi = i + 1; }
+  }
+  return Math.exp(lo + bi / B * span);
+}
+function autoThreshold() { setThreshold(Math.round(otsu(series()) * 10) / 10); }
+function rangeFor() {
+  const a = series(); let mx = 0, mn = Infinity;
+  for (const v of a) { if (v > mx) mx = v; if (v < mn) mn = v; }
+  return { mn, mx };
+}
+function setThreshold(t) {
+  const { mx } = rangeFor();
+  S.threshold = Math.max(0, t);
+  $('thRange').max = Math.ceil(mx * 1.05);
+  $('thRange').value = S.threshold; $('thNum').value = S.threshold.toFixed(1);
+  recompute();
+}
+$('thRange').addEventListener('input', () => { S.threshold = +$('thRange').value; $('thNum').value = S.threshold.toFixed(1); recompute(); });
+$('thNum').addEventListener('change', () => setThreshold(+$('thNum').value || 0));
+$('autoTh').addEventListener('click', autoThreshold);
+$('minRun').addEventListener('change', () => { S.minRun = Math.max(1, Math.round(+$('minRun').value || 1)); $('minRun').value = S.minRun; recompute(); });
+$('metric').addEventListener('change', () => { S.metric = $('metric').value; autoThreshold(); });
+
+function recompute() {
+  const a = series(), n = a.length, th = S.threshold, keep = new Uint8Array(n);
+  const segs = [];
+  let s = -1;
+  for (let i = 0; i <= n; i++) {
+    const on = i < n && a[i] >= th;
+    if (on && s < 0) s = i;
+    if (!on && s >= 0) {
+      if (i - s >= S.minRun) {
+        let pk = s; for (let k = s; k < i; k++) { keep[k] = 1; if (a[k] > a[pk]) pk = k; }
+        segs.push({ a: s, b: i - 1, peak: pk });
+      }
+      s = -1;
+    }
+  }
+  S.kept = keep; S.segments = segs;
+  const count = segs.reduce((t, g) => t + g.b - g.a + 1, 0);
+  const fps = S.scores.fps;
+  $('sKept').textContent = fmtNum(count);
+  $('sShare').textContent = (count / n * 100).toFixed(1) + '%';
+  $('sRuns').textContent = fmtNum(segs.length);
+  $('sDur').textContent = (count / fps).toFixed(1) + ' s';
+  renderSegments();
+  updateBadge(); drawChart();
+  if (!S.scores.example) { $('build').disabled = S.busy || count === 0; }
+  $('exDone').hidden = true;
+}
+function renderSegments() {
+  const body = $('segBody'); body.innerHTML = '';
+  const fps = S.scores.fps, a = series();
+  const frag = document.createDocumentFragment();
+  S.segments.slice(0, 2000).forEach((g, k) => {
+    const tr = document.createElement('tr');
+    const cells = [k + 1, `${g.a}–${g.b}`, (g.a / fps).toFixed(3), ((g.b + 1) / fps).toFixed(3), `${g.b - g.a + 1} fr`, g.peak, a[g.peak].toFixed(1)];
+    for (const c of cells) { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); }
+    tr.tabIndex = 0;
+    tr.addEventListener('click', () => goTo(g.peak));
+    tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') goTo(g.peak); });
+    frag.appendChild(tr);
+  });
+  body.appendChild(frag);
+  if (!S.segments.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 7; td.textContent = 'No frames reach this threshold.'; td.style.textAlign = 'left'; tr.appendChild(td); body.appendChild(tr); }
+}
+function updateBadge() {
+  const b = $('frameBadge');
+  if (!S.scores || S.scores.example || !S.kept || S.idx >= S.kept.length) { b.className = 'badge'; b.textContent = 'not scored'; return; }
+  const v = series()[S.idx], on = S.kept[S.idx];
+  b.className = 'badge' + (on ? ' in' : '');
+  b.textContent = `score ${v.toFixed(1)} · ${on ? 'in focus · kept' : 'out of focus'}`;
+}
+
+/* ---------- chart ---------- */
+const ch = $('chart'), cc = ch.getContext('2d');
+const PAD = { l: 40, r: 10, t: 10, b: 24 };
+let chartGeom = null;
+function tok(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function drawChart() {
+  if (!S.scores) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = ch.clientWidth, H = ch.clientHeight;
+  if (!W) return;
+  ch.width = Math.round(W * dpr); ch.height = Math.round(H * dpr);
+  cc.setTransform(dpr, 0, 0, dpr, 0, 0); cc.clearRect(0, 0, W, H);
+  const a = series(), n = a.length, fps = S.scores.fps;
+  const { mn, mx } = rangeFor();
+  const y0 = Math.max(0, Math.floor(mn * 0.85)), y1 = Math.ceil(Math.max(mx, S.threshold) * 1.06);
+  const pw = W - PAD.l - PAD.r, ph = H - PAD.t - PAD.b;
+  const X = (i) => PAD.l + i / Math.max(1, n - 1) * pw;
+  const Y = (v) => PAD.t + (1 - (v - y0) / (y1 - y0)) * ph;
+  chartGeom = { X, Y, n, y0, y1, pw, ph };
+  const font = '11px ' + tok('--font-mono');
+  cc.font = font; cc.fillStyle = tok('--muted'); cc.strokeStyle = tok('--chart-grid'); cc.lineWidth = 1;
+  // y grid
+  const step = niceStep((y1 - y0) / 4);
+  cc.textAlign = 'right'; cc.textBaseline = 'middle';
+  for (let v = Math.ceil(y0 / step) * step; v <= y1; v += step) {
+    const y = Math.round(Y(v)) + .5; cc.beginPath(); cc.moveTo(PAD.l, y); cc.lineTo(W - PAD.r, y); cc.stroke();
+    cc.fillText(String(+v.toFixed(1)), PAD.l - 6, y);
+  }
+  // x ticks in seconds
+  const dur = n / fps, xs = niceStep(dur / Math.max(2, Math.floor(pw / 90)));
+  cc.textAlign = 'center'; cc.textBaseline = 'top';
+  for (let t = 0; t <= dur; t += xs) { const x = X(t * fps); cc.fillText(t >= 60 ? `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, '0')}` : `${+t.toFixed(1)}s`, x, H - PAD.b + 6); }
+  // kept shading
+  if (S.kept) {
+    cc.fillStyle = tok('--peak-soft');
+    for (const g of S.segments) { const xa = X(g.a), xb = Math.max(X(g.b), xa + 1); cc.fillRect(xa, PAD.t, xb - xa, ph); }
+  }
+  // series as min/max envelope per pixel column
+  cc.strokeStyle = tok('--accent'); cc.lineWidth = 1; cc.beginPath();
+  const cols = Math.max(1, Math.floor(pw));
+  for (let c = 0; c < cols; c++) {
+    const i0 = Math.floor(c / cols * n), i1 = Math.max(i0 + 1, Math.floor((c + 1) / cols * n));
+    let lo = Infinity, hi = -Infinity;
+    for (let i = i0; i < i1 && i < n; i++) { const v = a[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    const x = PAD.l + c + .5;
+    if (c === 0) cc.moveTo(x, Y(hi)); else cc.lineTo(x, Y(hi));
+    cc.lineTo(x, Y(lo));
+  }
+  cc.stroke();
+  // threshold
+  const ty = Y(S.threshold);
+  cc.strokeStyle = tok('--peak'); cc.lineWidth = 2; cc.beginPath(); cc.moveTo(PAD.l, ty); cc.lineTo(W - PAD.r, ty); cc.stroke();
+  cc.fillStyle = tok('--peak'); cc.textAlign = 'right'; cc.textBaseline = 'bottom'; cc.font = '600 11px ' + tok('--font-mono');
+  cc.fillText(`≥ ${S.threshold.toFixed(1)}`, W - PAD.r - 2, ty - 3);
+  // playhead
+  if (S.info && !S.scores.example) {
+    const x = Math.round(X(S.idx)) + .5;
+    cc.strokeStyle = tok('--ink'); cc.lineWidth = 1; cc.setLineDash([3, 3]);
+    cc.beginPath(); cc.moveTo(x, PAD.t); cc.lineTo(x, PAD.t + ph); cc.stroke(); cc.setLineDash([]);
+  }
+}
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw || 1))), f = raw / p;
+  return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p;
+}
+let chartDrag = null;
+ch.addEventListener('pointerdown', (e) => {
+  if (!chartGeom) return;
+  const r = ch.getBoundingClientRect(), y = e.clientY - r.top;
+  ch.setPointerCapture(e.pointerId);
+  chartDrag = Math.abs(y - chartGeom.Y(S.threshold)) < 8 ? 'th' : 'scrub';
+  chartMove(e);
+});
+ch.addEventListener('pointermove', (e) => {
+  if (!chartGeom) return;
+  const r = ch.getBoundingClientRect();
+  if (!chartDrag) { ch.style.cursor = Math.abs(e.clientY - r.top - chartGeom.Y(S.threshold)) < 8 ? 'ns-resize' : 'crosshair'; return; }
+  chartMove(e);
+});
+ch.addEventListener('pointerup', () => { chartDrag = null; });
+function chartMove(e) {
+  const r = ch.getBoundingClientRect(), g = chartGeom;
+  if (chartDrag === 'th') {
+    const v = g.y0 + (1 - (e.clientY - r.top - PAD.t) / g.ph) * (g.y1 - g.y0);
+    S.threshold = Math.max(0, Math.round(v * 10) / 10); $('thRange').value = S.threshold; $('thNum').value = S.threshold.toFixed(1); recompute();
+  } else {
+    const i = (e.clientX - r.left - PAD.l) / g.pw * (g.n - 1);
+    if (S.info && !S.scores.example) goTo(i);
+  }
+}
+
+/* ---------- export ---------- */
+function baseName() { return (S.info.name.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_') || 'video'); }
+function scoresCsv() {
+  const fps = S.scores.fps, { lap, sob } = S.scores;
+  const lines = [`# source=${S.info.name}; fps=${fps}; method=${S.metric === 'lap' ? 'laplacian' : 'sobel'}; threshold=${S.threshold}; min_run=${S.minRun}; region=${S.analyzedRoi ? `${S.analyzedRoi.x},${S.analyzedRoi.y},${S.analyzedRoi.w},${S.analyzedRoi.h}` : 'full'}`,
+    'frame,time_s,laplacian_score,sobel_score,in_focus'];
+  for (let i = 0; i < lap.length; i++) lines.push(`${i},${(i / fps).toFixed(4)},${lap[i].toFixed(3)},${sob[i].toFixed(3)},${S.kept[i] ? 1 : 0}`);
+  return lines.join('\n') + '\n';
+}
+$('build').addEventListener('click', async () => {
+  if (S.busy || !S.kept) return;
+  const indices = []; S.kept.forEach((v, i) => { if (v) indices.push(i); });
+  if (!indices.length) return;
+  S.busy = true; setBusyUi(true);
+  $('exErr').hidden = true; $('exDone').hidden = true; $('exProg').hidden = false; $('exBar').className = 'bar indet'; $('exStatus').textContent = 'Starting…';
+  const format = $('format').value;
+  try {
+    const r = await call({ type: 'export', indices, format, csv: format !== 'mp4' && $('withCsv').checked ? scoresCsv() : null, baseName: baseName(), fps: S.info.fps }, 'exported');
+    S.exportBlob = r.blob; S.exportName = r.name;
+    $('exProg').hidden = true; $('exDone').hidden = false;
+    $('exInfo').textContent = `${r.name} · ${fmtNum(r.count)} frames · ${fmtBytes(r.size)}`;
+  } catch (e) {
+    $('exProg').hidden = true;
+    if (e.message !== 'cancelled') { $('exErr').hidden = false; $('exErr').textContent = e.message; }
+  } finally { S.busy = false; setBusyUi(false); pumpFrame(); }
+});
+$('save').addEventListener('click', () => saveFile(S.exportName, S.exportBlob));
+$('csvOnly').addEventListener('click', () => { if (S.scores && !S.scores.example) saveFile(baseName() + '_focus_scores.csv', new Blob([scoresCsv()], { type: 'text/csv' })); });
+$('format').addEventListener('change', () => { $('withCsv').disabled = $('format').value === 'mp4'; $('exDone').hidden = true; });
+
+let downloadsApi;
+async function getDownloads() {
+  if (downloadsApi !== undefined) return downloadsApi;
+  downloadsApi = null;
+  if (window.claude && typeof window.claude.use === 'function') {
+    try { downloadsApi = await window.claude.use('downloads'); } catch (e) { downloadsApi = null; }
+  }
+  return downloadsApi;
+}
+async function saveFile(name, blob) {
+  $('exErr').hidden = true;
+  const dl = await getDownloads();
+  if (dl) {
+    try { await dl.save({ filename: name, data: blob }); }
+    catch (e) {
+      if (e && e.code === 'declined') return;
+      $('exErr').hidden = false; $('exErr').textContent = 'The file could not be saved here (' + ((e && e.code) || 'error') + '). ' + ((e && e.message) || '');
+    }
+    return;
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+/* ---------- boot ---------- */
+S.scores = decodeExample();
+setThreshold(Math.round(otsu(S.scores.lap) * 10) / 10);
+requestAnimationFrame(drawChart);
+if (document.fonts) document.fonts.ready.then(drawChart);
+// Warm up the decoder in the background so the first file opens quickly.
+setTimeout(() => { if (!S.worker) ensureWorker().catch((e) => { $('openErr').hidden = false; $('openErr').textContent = e.message; }); }, 300);
+</script>
