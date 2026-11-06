@@ -122,6 +122,16 @@ th { position: sticky; top: 0; background: var(--panel); font: 600 11px var(--fo
 th:first-child, td:first-child { text-align: left; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: var(--peak-soft); }
+tbody tr.sel { background: var(--peak-soft); box-shadow: inset 3px 0 0 var(--peak); }
+th .unit { text-transform: none; letter-spacing: 0; font-weight: 400; }
+td.neg { color: var(--muted); }
+.chart-tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 6px 9px; font: 12px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.12); z-index: 2; }
+.chart-tip b { font-weight: 500; color: var(--peak); }
+.picked { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); font: 13px var(--font-mono); font-variant-numeric: tabular-nums; min-width: 0; }
+.picked .k { color: var(--muted); font-family: var(--font-body); font-size: 11px; text-transform: uppercase; letter-spacing: .07em; margin-right: 4px; }
+.picked strong { font-weight: 500; font-size: 15px; }
+.picked.in { border-color: var(--peak); background: var(--peak-soft); }
+.subhead { font: 600 12px var(--font-display); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 4px 0 0; }
 .method-note { font-size: 13px; color: var(--muted); max-width: 72ch; margin: 0; }
 details summary { cursor: pointer; font-size: 13px; color: var(--accent); }
 details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
@@ -216,10 +226,11 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
   <!-- 4. Timeline -->
   <section class="panel" aria-labelledby="h-tl">
     <div class="panel-head"><h2 id="h-tl"><b>4</b>Focus timeline</h2>
-      <div class="legend"><span><i style="background: var(--accent)"></i>sharpness score</span><span><i style="background: var(--peak)"></i>in-focus threshold</span><span><i style="background: var(--peak-soft); height: 10px"></i>frames kept</span></div>
+      <div class="legend"><span><i style="background: var(--accent); opacity: .35"></i>score per frame</span><span><i style="background: var(--accent)"></i>smoothed score</span><span><i style="background: var(--peak)"></i>threshold</span><span><i style="background: var(--ink); height: 4px"></i>block average</span><span><i style="background: var(--peak-soft); height: 10px"></i>in-focus block</span></div>
     </div>
     <div class="example-note" id="exampleNote"><b>Example data.</b> Scores from <span class="mono">Side2025-07-28T16_20_57.avi</span> (9,393 frames at 30 fps). Load a video and run the analysis to replace it with your own.</div>
-    <div class="chart-box"><canvas id="chart" aria-label="Sharpness score for every frame. Click to view a frame; drag the red line to change the threshold."></canvas></div>
+    <div class="chart-box" id="chartBox"><canvas id="chart" tabindex="0" aria-label="Sharpness score for every frame. Click a point to identify its frame; drag the red line to change the threshold."></canvas><div class="chart-tip" id="chartTip" hidden></div></div>
+    <div class="picked" id="picked" aria-live="polite"><span class="k">Selected point</span><span>Click the chart to identify a frame.</span></div>
     <div class="row">
       <label class="field grow">In-focus threshold
         <input type="range" id="thRange" min="0" max="100" step="0.1" value="20">
@@ -228,20 +239,52 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
         <input type="number" id="thNum" step="0.1" value="20">
       </label>
       <button type="button" id="autoTh">Auto threshold</button>
-      <label class="field">Min. run (frames)
-        <input type="number" id="minRun" min="1" step="1" value="1">
+    </div>
+    <div class="row">
+      <label class="field">Smoothing
+        <select id="smooth">
+          <option value="1">Off (raw scores)</option>
+          <option value="3">3-frame average</option>
+          <option value="5" selected>5-frame average</option>
+          <option value="9">9-frame average</option>
+          <option value="15">15-frame average</option>
+        </select>
+      </label>
+      <label class="field">Merge gaps ≤ (frames)
+        <input type="number" id="mergeGap" min="0" step="1" value="5">
+      </label>
+      <label class="field">Min. block (frames)
+        <input type="number" id="minRun" min="1" step="1" value="3">
+      </label>
+      <label class="field">Pixel size
+        <input type="number" id="pxSize" min="0" step="any" value="1">
+      </label>
+      <label class="field">Unit
+        <select id="pxUnit">
+          <option value="px" selected>px (uncalibrated)</option>
+          <option value="µm">µm</option>
+          <option value="mm">mm</option>
+          <option value="cm">cm</option>
+        </select>
       </label>
     </div>
     <div class="summary">
       <div><span>Frames kept</span><b class="hl" id="sKept">—</b></div>
       <div><span>Share of video</span><b id="sShare">—</b></div>
-      <div><span>In-focus runs</span><b id="sRuns">—</b></div>
+      <div><span>In-focus blocks</span><b id="sRuns">—</b></div>
       <div><span>Kept footage</span><b id="sDur">—</b></div>
+      <div><span>Mean speed <small id="sSpeedUnit" class="mono"></small></span><b id="sSpeed">—</b></div>
     </div>
+    <p class="subhead">In-focus blocks · average velocity and acceleration of the subject</p>
     <div class="segments"><table>
-      <thead><tr><th>Run</th><th>Frames</th><th>Start (s)</th><th>End (s)</th><th>Length</th><th>Peak frame</th><th>Peak score</th></tr></thead>
+      <thead><tr><th>Block</th><th>Frames</th><th>Start (s)</th><th>End (s)</th><th>Duration (s)</th><th>Avg score</th><th>Peak frame</th><th>Velocity x <span class="unit u-v"></span></th><th>Velocity y <span class="unit u-v"></span></th><th>Speed <span class="unit u-v"></span></th><th>Accel. x <span class="unit u-a"></span></th><th>Accel. y <span class="unit u-a"></span></th></tr></thead>
       <tbody id="segBody"></tbody>
     </table></div>
+    <details>
+      <summary>How blocks, velocity and acceleration are calculated</summary>
+      <p>The per-frame score is averaged over a sliding window (the Smoothing setting) so a single noisy frame can't split a pass in two. Frames whose smoothed score reaches the threshold are grouped into blocks; gaps up to “Merge gaps” frames long are absorbed into the surrounding block, and blocks shorter than “Min. block” are dropped. Each block's flat black bar on the chart is its average score.</p>
+      <p>The subject's position in every frame is the centroid of its strongest edges (the same pixels that set the sharpness score), locked onto the densest cluster so stray edges elsewhere are ignored. Within each block, a straight line fitted to position over time gives the average velocity, and a parabola fitted to the same points gives the average acceleration (twice its curvature). Points more than three robust standard deviations off the fit are discarded before the final fit. Positions are measured in pixels, so x is positive to the right and y is positive downward. Enter the size of one pixel to get real units. Tracking needs “Ignore the static scene” switched on.</p>
+    </details>
   </section>
 
   <!-- 5. Export -->
@@ -255,9 +298,10 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
           <option value="mp4">MP4 video of kept frames only</option>
         </select>
       </label>
-      <label class="check" style="padding-bottom: 8px"><input type="checkbox" id="withCsv" checked> Include scores CSV (ZIP only)</label>
+      <label class="check" style="padding-bottom: 8px"><input type="checkbox" id="withCsv" checked> Include scores + block CSVs (ZIP only)</label>
       <div class="row" style="margin-left:auto">
         <button type="button" id="csvOnly" disabled>Download scores CSV</button>
+        <button type="button" id="blocksCsv" disabled>Download block summary CSV</button>
         <button class="primary" type="button" id="build" disabled>Build file</button>
       </div>
     </div>
@@ -277,7 +321,8 @@ const EXAMPLE = '__EXAMPLE__';
 const S = {
   worker: null, ready: false, file: null, info: null,
   scores: null,       // {lap, sob, frames, fps, example}
-  metric: 'lap', threshold: 20, minRun: 1,
+  metric: 'lap', threshold: 20, minRun: 3, smooth: 5, mergeGap: 5, pxSize: 1, pxUnit: 'px',
+  sm: null, blockOf: null, picked: null,
   roi: null, analyzedRoi: undefined, bg: null, bgW: 0,
   idx: 0, kept: null, segments: [],
   frameImg: null,     // last decoded RGBA ImageData
@@ -287,10 +332,11 @@ const S = {
 function decodeExample() {
   const bin = atob(EXAMPLE); const u8 = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-  const u16 = new Uint16Array(u8.buffer); const n = u16.length / 2;
-  const lap = new Float32Array(n), sob = new Float32Array(n);
-  for (let i = 0; i < n; i++) { lap[i] = u16[i] / 10; sob[i] = u16[n + i] / 10; }
-  return { lap, sob, frames: n, fps: 30, example: true };
+  const u16 = new Uint16Array(u8.buffer); const n = u16.length / 4;
+  const lap = new Float32Array(n), sob = new Float32Array(n), cx = new Float32Array(n), cy = new Float32Array(n);
+  const pos = (v) => (v === 65535 ? NaN : v / 10);
+  for (let i = 0; i < n; i++) { lap[i] = u16[i] / 10; sob[i] = u16[n + i] / 10; cx[i] = pos(u16[2 * n + i]); cy[i] = pos(u16[3 * n + i]); }
+  return { lap, sob, cx, cy, frames: n, fps: 30, example: true };
 }
 
 /* ---------- worker plumbing ---------- */
@@ -426,6 +472,7 @@ function goTo(i) {
   S.idx = Math.max(0, Math.min(max, Math.round(i)));
   $('scrub').value = S.idx;
   $('frameReadout').textContent = `Frame ${fmtNum(S.idx)} · ${(S.idx / S.info.fps).toFixed(3)} s`;
+  if (S.scores && !S.scores.example) { S.picked = S.idx; updatePicked(); highlightBlockRow(false); }
   updateBadge(); drawChart();
   frameReq.want = S.idx; pumpFrame();
 }
@@ -449,6 +496,26 @@ function paintFrame() {
     peaking(out); cx.putImageData(out, 0, 0);
   } else cx.putImageData(img, 0, 0);
   drawRoi();
+  drawTrack();
+}
+// Subject track for the block containing this frame: path of tracked positions plus the current one.
+function drawTrack() {
+  const sc = S.scores;
+  if (!sc || sc.example || !sc.cx || !S.blockOf || S.frameIdx == null || S.frameIdx >= sc.cx.length) return;
+  const k = S.blockOf[S.frameIdx]; if (k < 0) return;
+  const g = S.segments[k], col = '#ffd34d', lw = Math.max(1.5, 2 / viewScale);
+  cx.save(); cx.strokeStyle = col; cx.lineWidth = lw; cx.globalAlpha = .85; cx.beginPath();
+  let started = false;
+  for (let i = g.a; i <= g.b; i++) { const x = sc.cx[i], y = sc.cy[i]; if (!Number.isFinite(x)) continue; if (!started) { cx.moveTo(x, y); started = true; } else cx.lineTo(x, y); }
+  cx.stroke(); cx.globalAlpha = 1;
+  const x = sc.cx[S.frameIdx], y = sc.cy[S.frameIdx];
+  if (Number.isFinite(x)) {
+    const r = Math.max(6, 9 / viewScale);
+    cx.lineWidth = lw; cx.beginPath(); cx.arc(x, y, r, 0, Math.PI * 2); cx.stroke();
+    cx.beginPath(); cx.moveTo(x - r * 1.8, y); cx.lineTo(x - r * .6, y); cx.moveTo(x + r * .6, y); cx.lineTo(x + r * 1.8, y);
+    cx.moveTo(x, y - r * 1.8); cx.lineTo(x, y - r * .6); cx.moveTo(x, y + r * .6); cx.lineTo(x, y + r * 1.8); cx.stroke();
+  }
+  cx.restore();
 }
 // Focus peaking: highlight pixels whose Laplacian (after background removal) is strong.
 function peaking(img) {
@@ -472,7 +539,7 @@ $('prevF').addEventListener('click', () => goTo(S.idx - 1));
 $('nextF').addEventListener('click', () => goTo(S.idx + 1));
 $('peakBtn').addEventListener('click', () => { const b = $('peakBtn'); b.setAttribute('aria-pressed', b.getAttribute('aria-pressed') === 'true' ? 'false' : 'true'); paintFrame(); });
 document.addEventListener('keydown', (e) => {
-  if (!S.info || /INPUT|SELECT|TEXTAREA|BUTTON/.test(document.activeElement.tagName)) return;
+  if (!S.info || /INPUT|SELECT|TEXTAREA|BUTTON|CANVAS/.test(document.activeElement.tagName)) return;
   if (e.key === 'ArrowRight') { goTo(S.idx + 1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { goTo(S.idx - 1); e.preventDefault(); }
 });
@@ -534,7 +601,8 @@ async function runAnalysis() {
   const roi = S.roi ? { ...S.roi } : null;
   try {
     const r = await call({ type: 'analyze', roi, bgSub: $('bgsub').checked, kFrac: +$('kfrac').value }, 'scores');
-    S.scores = { lap: r.lap, sob: r.sob, frames: r.frames, fps: S.info.fps, example: false };
+    S.scores = { lap: r.lap, sob: r.sob, cx: r.cx, cy: r.cy, frames: r.frames, fps: S.info.fps, example: false };
+    S.picked = null;
     S.bg = r.bg; S.bgW = S.info.width; S.analyzedRoi = roi;
     $('exampleNote').hidden = true;
     renderSpecs({ frames: r.frames });
@@ -543,7 +611,7 @@ async function runAnalysis() {
     $('anStatus').textContent = `Scored ${fmtNum(r.frames)} frames in ${r.seconds.toFixed(1)} s` + (r.bgCount ? ` · background from ${r.bgCount} keyframes` : '');
     autoThreshold();
     updateRoiReadout();
-    $('build').disabled = false; $('csvOnly').disabled = false;
+    $('build').disabled = false; $('csvOnly').disabled = false; $('blocksCsv').disabled = !S.segments.length;
     $('exportHint').textContent = 'Frames are named by their original frame number and timestamp, for example frame_000202_t6.733s.jpg.';
   } catch (e) {
     if (e.message !== 'cancelled') { $('anErr').hidden = false; $('anErr').textContent = e.message; }
@@ -552,6 +620,7 @@ async function runAnalysis() {
 }
 function setBusyUi(b) {
   $('analyze').disabled = b || !S.info; $('build').disabled = b || !S.scores || S.scores.example;
+  $('blocksCsv').disabled = b || !S.scores || S.scores.example || !S.segments.length;
   $('cancel').hidden = !b; $('pick').disabled = b; $('file').disabled = b;
 }
 let progT0 = 0;
@@ -582,7 +651,7 @@ async function cancelWork() {
   catch (e) { $('openErr').hidden = false; $('openErr').textContent = e.message; }
 }
 
-/* ---------- threshold + selection ---------- */
+/* ---------- threshold, smoothing and blocks ---------- */
 const series = () => S.scores[S.metric];
 
 function otsu(arr) {
@@ -600,7 +669,16 @@ function otsu(arr) {
   }
   return Math.exp(lo + bi / B * span);
 }
-function autoThreshold() { setThreshold(Math.round(otsu(series()) * 10) / 10); }
+// Centered moving average; the window shrinks at the ends.
+function movingAverage(a, w) {
+  const n = a.length; if (w <= 1) return a;
+  const out = new Float32Array(n), h = w >> 1;
+  const pre = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) pre[i + 1] = pre[i] + a[i];
+  for (let i = 0; i < n; i++) { const lo = Math.max(0, i - h), hi = Math.min(n, i + h + 1); out[i] = (pre[hi] - pre[lo]) / (hi - lo); }
+  return out;
+}
+function autoThreshold() { setThreshold(Math.round(otsu(movingAverage(series(), S.smooth)) * 10) / 10); }
 function rangeFor() {
   const a = series(); let mx = 0, mn = Infinity;
   for (const v of a) { if (v > mx) mx = v; if (v < mn) mn = v; }
@@ -616,65 +694,186 @@ function setThreshold(t) {
 $('thRange').addEventListener('input', () => { S.threshold = +$('thRange').value; $('thNum').value = S.threshold.toFixed(1); recompute(); });
 $('thNum').addEventListener('change', () => setThreshold(+$('thNum').value || 0));
 $('autoTh').addEventListener('click', autoThreshold);
+$('smooth').addEventListener('change', () => { S.smooth = +$('smooth').value; recompute(); });
+$('mergeGap').addEventListener('change', () => { S.mergeGap = Math.max(0, Math.round(+$('mergeGap').value || 0)); $('mergeGap').value = S.mergeGap; recompute(); });
 $('minRun').addEventListener('change', () => { S.minRun = Math.max(1, Math.round(+$('minRun').value || 1)); $('minRun').value = S.minRun; recompute(); });
+$('pxSize').addEventListener('change', () => { const v = +$('pxSize').value; S.pxSize = v > 0 ? v : 1; $('pxSize').value = S.pxSize; renderBlocks(); });
+$('pxUnit').addEventListener('change', () => { S.pxUnit = $('pxUnit').value; if (S.pxUnit === 'px') { S.pxSize = 1; $('pxSize').value = 1; } renderBlocks(); });
 $('metric').addEventListener('change', () => { S.metric = $('metric').value; autoThreshold(); });
 
-function recompute() {
-  const a = series(), n = a.length, th = S.threshold, keep = new Uint8Array(n);
-  const segs = [];
-  let s = -1;
-  for (let i = 0; i <= n; i++) {
-    const on = i < n && a[i] >= th;
-    if (on && s < 0) s = i;
-    if (!on && s >= 0) {
-      if (i - s >= S.minRun) {
-        let pk = s; for (let k = s; k < i; k++) { keep[k] = 1; if (a[k] > a[pk]) pk = k; }
-        segs.push({ a: s, b: i - 1, peak: pk });
-      }
-      s = -1;
-    }
+/* Least-squares polynomial fit (degree 1 or 2) of y(t); returns coefficients [c0, c1, (c2)]. */
+function polyfit(t, y, deg) {
+  const m = deg + 1, A = Array.from({ length: m }, () => new Float64Array(m + 1));
+  for (let k = 0; k < t.length; k++) {
+    const p = [1, t[k], t[k] * t[k]];
+    for (let r = 0; r < m; r++) { for (let c = 0; c < m; c++) A[r][c] += p[r] * p[c]; A[r][m] += p[r] * y[k]; }
   }
-  S.kept = keep; S.segments = segs;
-  const count = segs.reduce((t, g) => t + g.b - g.a + 1, 0);
+  for (let c = 0; c < m; c++) {            // Gauss-Jordan elimination with partial pivoting
+    let piv = c; for (let r = c + 1; r < m; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+    [A[c], A[piv]] = [A[piv], A[c]];
+    if (Math.abs(A[c][c]) < 1e-12) return null;
+    for (let r = 0; r < m; r++) if (r !== c) { const f = A[r][c] / A[c][c]; for (let k = c; k <= m; k++) A[r][k] -= f * A[c][k]; }
+  }
+  return A.map((row, r) => row[m] / row[r]);
+}
+const evalPoly = (c, t) => c[0] + c[1] * t + (c[2] || 0) * t * t;
+/* Average velocity (slope of a line) and acceleration (2x the parabola's curvature) of the
+   subject over frames a..b, after rejecting outliers more than 3 robust SDs from the fit. */
+function blockMotion(a, b) {
+  const { cx, cy, fps } = S.scores;
+  if (!cx) return null;
+  const idx = [];
+  for (let i = a; i <= b; i++) if (Number.isFinite(cx[i]) && Number.isFinite(cy[i])) idx.push(i);
+  if (idx.length < 3) return null;
+  const fitAxis = (arr) => {
+    let keep = idx.slice();
+    for (let pass = 0; pass < 2; pass++) {
+      const t = keep.map((i) => (i - a) / fps), y = keep.map((i) => arr[i]);
+      const c = polyfit(t, y, keep.length >= 4 ? 2 : 1); if (!c) break;
+      const res = keep.map((i, k) => Math.abs(y[k] - evalPoly(c, t[k])));
+      const sorted = res.slice().sort((p, q) => p - q), mad = sorted[sorted.length >> 1] * 1.4826;
+      const lim = Math.max(3 * mad, 2);
+      const next = keep.filter((_, k) => res[k] <= lim);
+      if (next.length === keep.length || next.length < 3) break;
+      keep = next;
+    }
+    const t = keep.map((i) => (i - a) / fps), y = keep.map((i) => arr[i]);
+    const lin = polyfit(t, y, 1), quad = keep.length >= 4 ? polyfit(t, y, 2) : null;
+    return { v: lin ? lin[1] : NaN, acc: quad ? 2 * quad[2] : NaN, n: keep.length };
+  };
+  const X = fitAxis(cx), Y = fitAxis(cy);
+  return { vx: X.v, vy: Y.v, ax: X.acc, ay: Y.acc, speed: Math.hypot(X.v, Y.v), used: Math.min(X.n, Y.n), total: idx.length };
+}
+
+function recompute() {
+  const raw = series(), n = raw.length, th = S.threshold;
+  const sm = movingAverage(raw, S.smooth);
+  S.sm = sm;
+  // 1. runs where the smoothed score reaches the threshold
+  let runs = []; let s = -1;
+  for (let i = 0; i <= n; i++) {
+    const on = i < n && sm[i] >= th;
+    if (on && s < 0) s = i;
+    if (!on && s >= 0) { runs.push([s, i - 1]); s = -1; }
+  }
+  // 2. merge runs separated by short gaps, 3. drop short blocks
+  const merged = [];
+  for (const r of runs) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] - last[1] - 1 <= S.mergeGap) last[1] = r[1]; else merged.push([r[0], r[1]]);
+  }
+  const keep = new Uint8Array(n), blockOf = new Int32Array(n).fill(-1);
+  const blocks = [];
+  for (const [a, b] of merged) {
+    if (b - a + 1 < S.minRun) continue;
+    let sum = 0, pk = a;
+    for (let k = a; k <= b; k++) { keep[k] = 1; blockOf[k] = blocks.length; sum += raw[k]; if (raw[k] > raw[pk]) pk = k; }
+    blocks.push({ a, b, mean: sum / (b - a + 1), peak: pk, motion: blockMotion(a, b) });
+  }
+  S.kept = keep; S.blockOf = blockOf; S.segments = blocks;
+  const count = blocks.reduce((t, g) => t + g.b - g.a + 1, 0);
   const fps = S.scores.fps;
   $('sKept').textContent = fmtNum(count);
   $('sShare').textContent = (count / n * 100).toFixed(1) + '%';
-  $('sRuns').textContent = fmtNum(segs.length);
+  $('sRuns').textContent = fmtNum(blocks.length);
   $('sDur').textContent = (count / fps).toFixed(1) + ' s';
-  renderSegments();
-  updateBadge(); drawChart();
-  if (!S.scores.example) { $('build').disabled = S.busy || count === 0; }
+  renderBlocks();
+  updateBadge(); updatePicked(); drawChart(); paintFrame();
+  if (!S.scores.example) { $('build').disabled = S.busy || count === 0; $('blocksCsv').disabled = blocks.length === 0; }
   $('exDone').hidden = true;
 }
-function renderSegments() {
+
+const unitV = () => `${S.pxUnit}/s`, unitA = () => `${S.pxUnit}/s²`;
+const fmtMotion = (v) => Number.isFinite(v) ? (v * S.pxSize).toFixed(Math.abs(v * S.pxSize) >= 100 ? 0 : 1) : '—';
+function renderBlocks() {
+  document.querySelectorAll('.u-v').forEach((e) => { e.textContent = `(${unitV()})`; });
+  document.querySelectorAll('.u-a').forEach((e) => { e.textContent = `(${unitA()})`; });
+  $('sSpeedUnit').textContent = unitV();
+  // Mean speed across blocks, weighted by block length
+  let ws = 0, wn = 0;
+  for (const g of S.segments) if (g.motion && Number.isFinite(g.motion.speed)) { const w = g.b - g.a + 1; ws += g.motion.speed * w; wn += w; }
+  $('sSpeed').textContent = wn ? fmtMotion(ws / wn) : '—';
+
   const body = $('segBody'); body.innerHTML = '';
-  const fps = S.scores.fps, a = series();
+  const fps = S.scores.fps;
   const frag = document.createDocumentFragment();
   S.segments.slice(0, 2000).forEach((g, k) => {
-    const tr = document.createElement('tr');
-    const cells = [k + 1, `${g.a}–${g.b}`, (g.a / fps).toFixed(3), ((g.b + 1) / fps).toFixed(3), `${g.b - g.a + 1} fr`, g.peak, a[g.peak].toFixed(1)];
+    const tr = document.createElement('tr'); tr.dataset.block = k;
+    const m = g.motion || {};
+    const cells = [k + 1, `${g.a}–${g.b}`, (g.a / fps).toFixed(3), ((g.b + 1) / fps).toFixed(3), ((g.b - g.a + 1) / fps).toFixed(3),
+      g.mean.toFixed(1), g.peak, fmtMotion(m.vx), fmtMotion(m.vy), fmtMotion(m.speed), fmtMotion(m.ax), fmtMotion(m.ay)];
     for (const c of cells) { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); }
     tr.tabIndex = 0;
+    if (S.blockOf && S.blockOf[S.idx] === k) tr.classList.add('sel');
     tr.addEventListener('click', () => goTo(g.peak));
     tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') goTo(g.peak); });
     frag.appendChild(tr);
   });
   body.appendChild(frag);
-  if (!S.segments.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 7; td.textContent = 'No frames reach this threshold.'; td.style.textAlign = 'left'; tr.appendChild(td); body.appendChild(tr); }
+  if (!S.segments.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 12; td.textContent = 'No frames reach this threshold.'; td.style.textAlign = 'left'; tr.appendChild(td); body.appendChild(tr); }
+}
+function highlightBlockRow(scroll) {
+  const k = S.blockOf ? S.blockOf[S.idx] : -1;
+  document.querySelectorAll('#segBody tr.sel').forEach((r) => r.classList.remove('sel'));
+  if (k < 0) return;
+  const row = document.querySelector(`#segBody tr[data-block="${k}"]`);
+  if (row) { row.classList.add('sel'); if (scroll) row.scrollIntoView({ block: 'nearest' }); }
+}
+function frameFacts(i) {
+  const raw = series(), fps = S.scores.fps;
+  const k = S.blockOf ? S.blockOf[i] : -1;
+  return { i, t: i / fps, score: raw[i], sm: S.sm ? S.sm[i] : raw[i], k, block: k >= 0 ? S.segments[k] : null };
+}
+function updatePicked() {
+  const el = $('picked');
+  if (S.picked == null || !S.scores || S.picked >= series().length) { el.className = 'picked'; el.innerHTML = '<span class="k">Selected point</span><span>Click the chart to identify a frame.</span>'; return; }
+  const f = frameFacts(S.picked);
+  el.className = 'picked' + (f.block ? ' in' : '');
+  el.innerHTML = '';
+  const add = (k, v, strong) => { const s = document.createElement('span'); const a = document.createElement('span'); a.className = 'k'; a.textContent = k; s.appendChild(a); const b = document.createElement(strong ? 'strong' : 'span'); b.textContent = v; s.appendChild(b); el.appendChild(s); };
+  add('Frame', fmtNum(f.i), true);
+  add('Time', f.t.toFixed(3) + ' s');
+  add('Score', f.score.toFixed(1));
+  if (S.smooth > 1) add('Smoothed', f.sm.toFixed(1));
+  if (f.block) {
+    const m = f.block.motion;
+    add('Block', `${f.k + 1} (frames ${f.block.a}–${f.block.b})`);
+    add('Block avg', f.block.mean.toFixed(1));
+    if (m) add('Velocity', `${fmtMotion(m.vx)}, ${fmtMotion(m.vy)} ${unitV()}`);
+    if (m) add('Accel.', `${fmtMotion(m.ax)}, ${fmtMotion(m.ay)} ${unitA()}`);
+  } else add('Status', 'not in an in-focus block');
+  if (S.scores.example) add('', 'example data · load a video to see the frame');
 }
 function updateBadge() {
   const b = $('frameBadge');
   if (!S.scores || S.scores.example || !S.kept || S.idx >= S.kept.length) { b.className = 'badge'; b.textContent = 'not scored'; return; }
-  const v = series()[S.idx], on = S.kept[S.idx];
-  b.className = 'badge' + (on ? ' in' : '');
-  b.textContent = `score ${v.toFixed(1)} · ${on ? 'in focus · kept' : 'out of focus'}`;
+  const v = series()[S.idx], k = S.blockOf[S.idx];
+  b.className = 'badge' + (k >= 0 ? ' in' : '');
+  b.textContent = `score ${v.toFixed(1)} · ${k >= 0 ? `in focus · block ${k + 1}` : 'out of focus'}`;
 }
 
 /* ---------- chart ---------- */
 const ch = $('chart'), cc = ch.getContext('2d');
-const PAD = { l: 40, r: 10, t: 10, b: 24 };
-let chartGeom = null;
+const PAD = { l: 40, r: 10, t: 14, b: 24 };
+let chartGeom = null, hoverIdx = null;
 function tok(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function withAlpha(col, a) {
+  if (/^#[0-9a-f]{6}$/i.test(col)) { const c = parseInt(col.slice(1), 16); return `rgba(${c >> 16},${(c >> 8) & 255},${c & 255},${a})`; }
+  return col;
+}
+function drawEnvelope(a, n, X0, pw, Y) {
+  const cols = Math.max(1, Math.floor(pw));
+  cc.beginPath();
+  for (let c = 0; c < cols; c++) {
+    const i0 = Math.floor(c / cols * n), i1 = Math.max(i0 + 1, Math.floor((c + 1) / cols * n));
+    let lo = Infinity, hi = -Infinity;
+    for (let i = i0; i < i1 && i < n; i++) { const v = a[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    const x = X0 + c + .5;
+    if (c === 0) cc.moveTo(x, Y(hi)); else cc.lineTo(x, Y(hi));
+    cc.lineTo(x, Y(lo));
+  }
+  cc.stroke();
+}
 function drawChart() {
   if (!S.scores) return;
   const dpr = window.devicePixelRatio || 1;
@@ -689,46 +888,53 @@ function drawChart() {
   const X = (i) => PAD.l + i / Math.max(1, n - 1) * pw;
   const Y = (v) => PAD.t + (1 - (v - y0) / (y1 - y0)) * ph;
   chartGeom = { X, Y, n, y0, y1, pw, ph };
-  const font = '11px ' + tok('--font-mono');
-  cc.font = font; cc.fillStyle = tok('--muted'); cc.strokeStyle = tok('--chart-grid'); cc.lineWidth = 1;
-  // y grid
+  const accent = tok('--accent'), peak = tok('--peak'), ink = tok('--ink');
+  cc.font = '11px ' + tok('--font-mono'); cc.fillStyle = tok('--muted'); cc.strokeStyle = tok('--chart-grid'); cc.lineWidth = 1;
   const step = niceStep((y1 - y0) / 4);
   cc.textAlign = 'right'; cc.textBaseline = 'middle';
   for (let v = Math.ceil(y0 / step) * step; v <= y1; v += step) {
     const y = Math.round(Y(v)) + .5; cc.beginPath(); cc.moveTo(PAD.l, y); cc.lineTo(W - PAD.r, y); cc.stroke();
     cc.fillText(String(+v.toFixed(1)), PAD.l - 6, y);
   }
-  // x ticks in seconds
   const dur = n / fps, xs = niceStep(dur / Math.max(2, Math.floor(pw / 90)));
   cc.textAlign = 'center'; cc.textBaseline = 'top';
   for (let t = 0; t <= dur; t += xs) { const x = X(t * fps); cc.fillText(t >= 60 ? `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, '0')}` : `${+t.toFixed(1)}s`, x, H - PAD.b + 6); }
-  // kept shading
-  if (S.kept) {
-    cc.fillStyle = tok('--peak-soft');
-    for (const g of S.segments) { const xa = X(g.a), xb = Math.max(X(g.b), xa + 1); cc.fillRect(xa, PAD.t, xb - xa, ph); }
-  }
-  // series as min/max envelope per pixel column
-  cc.strokeStyle = tok('--accent'); cc.lineWidth = 1; cc.beginPath();
-  const cols = Math.max(1, Math.floor(pw));
-  for (let c = 0; c < cols; c++) {
-    const i0 = Math.floor(c / cols * n), i1 = Math.max(i0 + 1, Math.floor((c + 1) / cols * n));
-    let lo = Infinity, hi = -Infinity;
-    for (let i = i0; i < i1 && i < n; i++) { const v = a[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
-    const x = PAD.l + c + .5;
-    if (c === 0) cc.moveTo(x, Y(hi)); else cc.lineTo(x, Y(hi));
-    cc.lineTo(x, Y(lo));
-  }
-  cc.stroke();
+  // in-focus blocks
+  cc.fillStyle = tok('--peak-soft');
+  for (const g of S.segments) { const xa = X(g.a), xb = Math.max(X(g.b), xa + 1); cc.fillRect(xa, PAD.t, xb - xa, ph); }
+  // raw scores (faint) and smoothed scores
+  cc.lineWidth = 1;
+  if (S.smooth > 1) {
+    cc.strokeStyle = withAlpha(accent, .3); drawEnvelope(a, n, PAD.l, pw, Y);
+    cc.strokeStyle = accent; cc.lineWidth = 1.25; drawEnvelope(S.sm, n, PAD.l, pw, Y);
+  } else { cc.strokeStyle = accent; drawEnvelope(a, n, PAD.l, pw, Y); }
+  // block averages: flat bar across each block at its mean score
+  cc.strokeStyle = ink; cc.lineWidth = 3; cc.lineCap = 'butt';
+  for (const g of S.segments) { const y = Y(g.mean); cc.beginPath(); cc.moveTo(X(g.a), y); cc.lineTo(Math.max(X(g.b), X(g.a) + 2), y); cc.stroke(); }
   // threshold
   const ty = Y(S.threshold);
-  cc.strokeStyle = tok('--peak'); cc.lineWidth = 2; cc.beginPath(); cc.moveTo(PAD.l, ty); cc.lineTo(W - PAD.r, ty); cc.stroke();
-  cc.fillStyle = tok('--peak'); cc.textAlign = 'right'; cc.textBaseline = 'bottom'; cc.font = '600 11px ' + tok('--font-mono');
+  cc.strokeStyle = peak; cc.lineWidth = 2; cc.beginPath(); cc.moveTo(PAD.l, ty); cc.lineTo(W - PAD.r, ty); cc.stroke();
+  cc.fillStyle = peak; cc.textAlign = 'right'; cc.textBaseline = 'bottom'; cc.font = '600 11px ' + tok('--font-mono');
   cc.fillText(`≥ ${S.threshold.toFixed(1)}`, W - PAD.r - 2, ty - 3);
-  // playhead
-  if (S.info && !S.scores.example) {
-    const x = Math.round(X(S.idx)) + .5;
-    cc.strokeStyle = tok('--ink'); cc.lineWidth = 1; cc.setLineDash([3, 3]);
+  // hover guide
+  if (hoverIdx != null && !chartDrag) {
+    const x = Math.round(X(hoverIdx)) + .5;
+    cc.strokeStyle = withAlpha(tok('--muted').startsWith('#') ? tok('--muted') : '#888888', .6); cc.lineWidth = 1;
+    cc.beginPath(); cc.moveTo(x, PAD.t); cc.lineTo(x, PAD.t + ph); cc.stroke();
+  }
+  // selected frame: vertical line, dot on the score, and a frame label
+  const sel = S.picked != null ? S.picked : (S.info && !S.scores.example ? S.idx : null);
+  if (sel != null && sel < n) {
+    const x = Math.round(X(sel)) + .5, y = Y(a[sel]);
+    cc.strokeStyle = ink; cc.lineWidth = 1; cc.setLineDash([3, 3]);
     cc.beginPath(); cc.moveTo(x, PAD.t); cc.lineTo(x, PAD.t + ph); cc.stroke(); cc.setLineDash([]);
+    cc.fillStyle = ink; cc.beginPath(); cc.arc(x, y, 4, 0, Math.PI * 2); cc.fill();
+    cc.strokeStyle = tok('--panel'); cc.lineWidth = 1.5; cc.stroke();
+    const label = `frame ${fmtNum(sel)}`;
+    cc.font = '600 11px ' + tok('--font-mono'); const tw = cc.measureText(label).width + 10;
+    const lx = Math.min(Math.max(x - tw / 2, PAD.l), W - PAD.r - tw);
+    cc.fillStyle = ink; cc.fillRect(lx, 0, tw, 14);
+    cc.fillStyle = tok('--panel'); cc.textAlign = 'left'; cc.textBaseline = 'middle'; cc.fillText(label, lx + 5, 7.5);
   }
 }
 function niceStep(raw) {
@@ -736,38 +942,86 @@ function niceStep(raw) {
   return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p;
 }
 let chartDrag = null;
+const chartIndexAt = (e) => { const r = ch.getBoundingClientRect(), g = chartGeom; return Math.max(0, Math.min(g.n - 1, Math.round((e.clientX - r.left - PAD.l) / g.pw * (g.n - 1)))); };
+const nearThreshold = (e) => { const r = ch.getBoundingClientRect(); return Math.abs(e.clientY - r.top - chartGeom.Y(S.threshold)) < 7; };
 ch.addEventListener('pointerdown', (e) => {
   if (!chartGeom) return;
-  const r = ch.getBoundingClientRect(), y = e.clientY - r.top;
   ch.setPointerCapture(e.pointerId);
-  chartDrag = Math.abs(y - chartGeom.Y(S.threshold)) < 8 ? 'th' : 'scrub';
+  chartDrag = nearThreshold(e) ? 'th' : 'pick';
+  $('chartTip').hidden = chartDrag === 'th';
   chartMove(e);
 });
 ch.addEventListener('pointermove', (e) => {
   if (!chartGeom) return;
-  const r = ch.getBoundingClientRect();
-  if (!chartDrag) { ch.style.cursor = Math.abs(e.clientY - r.top - chartGeom.Y(S.threshold)) < 8 ? 'ns-resize' : 'crosshair'; return; }
+  if (!chartDrag) {
+    ch.style.cursor = nearThreshold(e) ? 'ns-resize' : 'crosshair';
+    hoverIdx = chartIndexAt(e); showTip(e, hoverIdx); drawChart();
+    return;
+  }
   chartMove(e);
 });
 ch.addEventListener('pointerup', () => { chartDrag = null; });
+ch.addEventListener('pointerleave', () => { hoverIdx = null; $('chartTip').hidden = true; if (!chartDrag) drawChart(); });
+ch.addEventListener('keydown', (e) => {
+  if (!S.scores) return;
+  const n = series().length, cur = S.picked != null ? S.picked : S.idx;
+  const step = e.shiftKey ? Math.round(S.scores.fps) : 1;
+  if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { pickFrame(Math.max(0, Math.min(n - 1, cur + (e.key === 'ArrowRight' ? step : -step))), true); e.preventDefault(); }
+});
 function chartMove(e) {
   const r = ch.getBoundingClientRect(), g = chartGeom;
   if (chartDrag === 'th') {
     const v = g.y0 + (1 - (e.clientY - r.top - PAD.t) / g.ph) * (g.y1 - g.y0);
     S.threshold = Math.max(0, Math.round(v * 10) / 10); $('thRange').value = S.threshold; $('thNum').value = S.threshold.toFixed(1); recompute();
   } else {
-    const i = (e.clientX - r.left - PAD.l) / g.pw * (g.n - 1);
-    if (S.info && !S.scores.example) goTo(i);
+    const i = chartIndexAt(e);
+    showTip(e, i);
+    pickFrame(i, true);
   }
+}
+function pickFrame(i, scrollRow) {
+  S.picked = i;
+  if (S.info && !S.scores.example) goTo(i); else { S.idx = i; drawChart(); }
+  updatePicked(); highlightBlockRow(scrollRow);
+}
+function showTip(e, i) {
+  const tip = $('chartTip'), f = frameFacts(i);
+  tip.innerHTML = '';
+  const line = (txt, cls) => { const d = document.createElement('div'); if (cls) { const b = document.createElement('b'); b.textContent = txt; d.appendChild(b); } else d.textContent = txt; tip.appendChild(d); };
+  line(`Frame ${fmtNum(i)} · ${f.t.toFixed(3)} s`);
+  line(`score ${f.score.toFixed(1)}` + (S.smooth > 1 ? ` · smoothed ${f.sm.toFixed(1)}` : ''));
+  if (f.block) line(`block ${f.k + 1} · avg ${f.block.mean.toFixed(1)}`, true); else line('out of focus');
+  tip.hidden = false;
+  const box = $('chartBox').getBoundingClientRect(), r = ch.getBoundingClientRect();
+  const x = e.clientX - box.left, w = tip.offsetWidth;
+  tip.style.left = Math.max(0, Math.min(box.width - w, x + 12 + w > box.width ? x - w - 12 : x + 12)) + 'px';
+  tip.style.top = Math.max(0, e.clientY - r.top - tip.offsetHeight - 10) + 'px';
 }
 
 /* ---------- export ---------- */
 function baseName() { return (S.info.name.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_') || 'video'); }
+function settingsLine() {
+  return `# source=${S.info.name}; fps=${S.scores.fps}; method=${S.metric === 'lap' ? 'laplacian' : 'sobel'}; threshold=${S.threshold}; smoothing=${S.smooth}; merge_gap=${S.mergeGap}; min_block=${S.minRun}; pixel_size=${S.pxSize} ${S.pxUnit}; region=${S.analyzedRoi ? `${S.analyzedRoi.x},${S.analyzedRoi.y},${S.analyzedRoi.w},${S.analyzedRoi.h}` : 'full'}`;
+}
 function scoresCsv() {
-  const fps = S.scores.fps, { lap, sob } = S.scores;
-  const lines = [`# source=${S.info.name}; fps=${fps}; method=${S.metric === 'lap' ? 'laplacian' : 'sobel'}; threshold=${S.threshold}; min_run=${S.minRun}; region=${S.analyzedRoi ? `${S.analyzedRoi.x},${S.analyzedRoi.y},${S.analyzedRoi.w},${S.analyzedRoi.h}` : 'full'}`,
-    'frame,time_s,laplacian_score,sobel_score,in_focus'];
-  for (let i = 0; i < lap.length; i++) lines.push(`${i},${(i / fps).toFixed(4)},${lap[i].toFixed(3)},${sob[i].toFixed(3)},${S.kept[i] ? 1 : 0}`);
+  const fps = S.scores.fps, { lap, sob, cx, cy } = S.scores;
+  const lines = [settingsLine(), 'frame,time_s,laplacian_score,sobel_score,smoothed_score,subject_x_px,subject_y_px,block,in_focus'];
+  const f = (v) => Number.isFinite(v) ? v.toFixed(2) : '';
+  for (let i = 0; i < lap.length; i++) {
+    const k = S.blockOf[i];
+    lines.push(`${i},${(i / fps).toFixed(4)},${lap[i].toFixed(3)},${sob[i].toFixed(3)},${S.sm[i].toFixed(3)},${f(cx[i])},${f(cy[i])},${k >= 0 ? k + 1 : ''},${k >= 0 ? 1 : 0}`);
+  }
+  return lines.join('\n') + '\n';
+}
+function blocksCsv() {
+  const fps = S.scores.fps, u = S.pxUnit;
+  const lines = [settingsLine(), `block,start_frame,end_frame,start_s,end_s,duration_s,frames,avg_score,peak_frame,peak_score,velocity_x_${u}_per_s,velocity_y_${u}_per_s,speed_${u}_per_s,accel_x_${u}_per_s2,accel_y_${u}_per_s2,tracked_points_used`];
+  const f = (v) => Number.isFinite(v) ? (v * S.pxSize).toFixed(4) : '';
+  S.segments.forEach((g, k) => {
+    const m = g.motion || {};
+    lines.push([k + 1, g.a, g.b, (g.a / fps).toFixed(4), ((g.b + 1) / fps).toFixed(4), ((g.b - g.a + 1) / fps).toFixed(4), g.b - g.a + 1,
+      g.mean.toFixed(3), g.peak, series()[g.peak].toFixed(3), f(m.vx), f(m.vy), f(m.speed), f(m.ax), f(m.ay), m.used != null ? `${m.used}/${m.total}` : ''].join(','));
+  });
   return lines.join('\n') + '\n';
 }
 $('build').addEventListener('click', async () => {
@@ -776,9 +1030,10 @@ $('build').addEventListener('click', async () => {
   if (!indices.length) return;
   S.busy = true; setBusyUi(true);
   $('exErr').hidden = true; $('exDone').hidden = true; $('exProg').hidden = false; $('exBar').className = 'bar indet'; $('exStatus').textContent = 'Starting…';
-  const format = $('format').value;
+  const format = $('format').value, withCsv = format !== 'mp4' && $('withCsv').checked;
   try {
-    const r = await call({ type: 'export', indices, format, csv: format !== 'mp4' && $('withCsv').checked ? scoresCsv() : null, baseName: baseName(), fps: S.info.fps }, 'exported');
+    const r = await call({ type: 'export', indices, format, csv: withCsv ? scoresCsv() : null,
+      extraFiles: withCsv ? [{ name: 'blocks.csv', text: blocksCsv() }] : [], baseName: baseName(), fps: S.info.fps }, 'exported');
     S.exportBlob = r.blob; S.exportName = r.name;
     $('exProg').hidden = true; $('exDone').hidden = false;
     $('exInfo').textContent = `${r.name} · ${fmtNum(r.count)} frames · ${fmtBytes(r.size)}`;
@@ -789,6 +1044,7 @@ $('build').addEventListener('click', async () => {
 });
 $('save').addEventListener('click', () => saveFile(S.exportName, S.exportBlob));
 $('csvOnly').addEventListener('click', () => { if (S.scores && !S.scores.example) saveFile(baseName() + '_focus_scores.csv', new Blob([scoresCsv()], { type: 'text/csv' })); });
+$('blocksCsv').addEventListener('click', () => { if (S.scores && !S.scores.example) saveFile(baseName() + '_focus_blocks.csv', new Blob([blocksCsv()], { type: 'text/csv' })); });
 $('format').addEventListener('change', () => { $('withCsv').disabled = $('format').value === 'mp4'; $('exDone').hidden = true; });
 
 let downloadsApi;
@@ -818,7 +1074,7 @@ async function saveFile(name, blob) {
 
 /* ---------- boot ---------- */
 S.scores = decodeExample();
-setThreshold(Math.round(otsu(S.scores.lap) * 10) / 10);
+autoThreshold();
 requestAnimationFrame(drawChart);
 if (document.fonts) document.fonts.ready.then(drawChart);
 // Warm up the decoder in the background so the first file opens quickly.

@@ -204,6 +204,7 @@ function makeScorer(W, H, roi, bg, kFrac) {
   const px = Math.max(1, (x1 - x0) * (y1 - y0));
   const K = Math.max(32, Math.round(px * kFrac));
   const D = new Int16Array(W * H);
+  const LA = new Uint16Array(W * H);   // |Laplacian| per pixel, reused for subject tracking
   const histL = new Uint32Array(4096), histS = new Uint32Array(4096);
   const topMean = (hist) => {
     let need = K, sum = 0;
@@ -212,6 +213,34 @@ function makeScorer(W, H, roi, bg, kFrac) {
       const take = c < need ? c : need; sum += take * v; need -= take;
     }
     return sum / (K - need);
+  };
+  // Strong-edge pixels of the current frame, used to locate the subject.
+  const MAXP = Math.max(4096, K * 8);
+  const PX = new Uint16Array(MAXP), PY = new Uint16Array(MAXP), PW = new Uint16Array(MAXP);
+  const CELL = 16, GW = Math.ceil(W / CELL), GH = Math.ceil(H / CELL);
+  const grid = new Float64Array(GW * GH);
+  const R = Math.max(48, Math.round(0.08 * Math.max(x1 - x0, y1 - y0)));
+  // Find the densest 5x5-cell cluster of strong edges, then take the weighted centroid of
+  // edge pixels within R of it (twice, re-centering). Stray edges elsewhere are ignored.
+  const locate = (np) => {
+    if (!np) return [NaN, NaN];
+    grid.fill(0);
+    for (let k = 0; k < np; k++) grid[((PY[k] / CELL) | 0) * GW + ((PX[k] / CELL) | 0)] += PW[k];
+    let best = -1, bx = 0, by = 0;
+    for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+      let sum = 0;
+      for (let dy = -2; dy <= 2; dy++) { const yy = gy + dy; if (yy < 0 || yy >= GH) continue;
+        for (let dx = -2; dx <= 2; dx++) { const xx = gx + dx; if (xx >= 0 && xx < GW) sum += grid[yy * GW + xx]; } }
+      if (sum > best) { best = sum; bx = gx; by = gy; }
+    }
+    let cx = (bx + .5) * CELL, cy = (by + .5) * CELL;
+    for (let it = 0; it < 2; it++) {
+      let sw = 0, sx = 0, sy = 0; const r2 = R * R;
+      for (let k = 0; k < np; k++) { const dx = PX[k] - cx, dy = PY[k] - cy;
+        if (dx * dx + dy * dy <= r2) { const w = PW[k]; sw += w; sx += w * PX[k]; sy += w * PY[k]; } }
+      if (!sw) break; cx = sx / sw; cy = sy / sw;
+    }
+    return [cx, cy];
   };
   return (g) => {
     const ya = y0 - 1, yb = y1 + 1, xa = x0 - 1, xb = x1 + 1;
@@ -226,7 +255,7 @@ function makeScorer(W, H, roi, bg, kFrac) {
       for (let i = r + x0, e = r + x1; i < e; i++) {
         const c = D[i], l = D[i - 1], rr = D[i + 1], u = D[i - W], d = D[i + W];
         let lap = l + rr + u + d - 4 * c; if (lap < 0) lap = -lap;
-        histL[lap > 4095 ? 4095 : lap]++;
+        LA[i] = lap; histL[lap > 4095 ? 4095 : lap]++;
         const ul = D[i - W - 1], ur = D[i - W + 1], dl = D[i + W - 1], dr = D[i + W + 1];
         let gx = (ur + 2 * rr + dr) - (ul + 2 * l + dl); if (gx < 0) gx = -gx;
         let gy = (dl + 2 * d + dr) - (ul + 2 * u + ur); if (gy < 0) gy = -gy;
@@ -234,7 +263,20 @@ function makeScorer(W, H, roi, bg, kFrac) {
         histS[s > 4095 ? 4095 : s]++;
       }
     }
-    return [topMean(histL), topMean(histS) / 4];
+    // Subject position: |Laplacian|-weighted centroid of the same strongest pixels that set the score.
+    let need = K, cut = 0;
+    for (let v = 4095; v >= 0; v--) { need -= histL[v]; if (need <= 0) { cut = v; break; } }
+    if (cut < 1) cut = 1;
+    let np = 0;
+    for (let y = y0; y < y1 && np < MAXP; y++) {
+      const r = y * W;
+      for (let x = x0, i = r + x0; x < x1; x++, i++) {
+        const a = LA[i];
+        if (a >= cut) { PX[np] = x; PY[np] = y; PW[np] = a; if (++np >= MAXP) break; }
+      }
+    }
+    const [cx, cy] = locate(np);
+    return [topMean(histL), topMean(histS) / 4, cx, cy];
   };
 }
 
@@ -249,16 +291,16 @@ function analyze({ roi, bgSub, kFrac }) {
   }
   const scorer = makeScorer(W, H, roi, bg, kFrac);
   let cap = Math.max(16, Math.ceil(info.frames * 1.05) + 16);
-  let lap = new Float32Array(cap), sob = new Float32Array(cap);
+  let lap = new Float32Array(cap), sob = new Float32Array(cap), cx = new Float32Array(cap), cy = new Float32Array(cap);
+  const grow = (arr) => { const a = new Float32Array(cap); a.set(arr); return a; };
   let lastPost = 0;
   const t1 = performance.now();
   const n = streamFrames([], null, 'gray', N, (g, i) => {
     if (i >= cap) {
       cap *= 2;
-      const a = new Float32Array(cap); a.set(lap); lap = a;
-      const b = new Float32Array(cap); b.set(sob); sob = b;
+      lap = grow(lap); sob = grow(sob); cx = grow(cx); cy = grow(cy);
     }
-    const s = scorer(g); lap[i] = s[0]; sob[i] = s[1];
+    const s = scorer(g); lap[i] = s[0]; sob[i] = s[1]; cx[i] = s[2]; cy[i] = s[3];
     const now = performance.now();
     if (now - lastPost > 120) {
       lastPost = now;
@@ -266,10 +308,10 @@ function analyze({ roi, bgSub, kFrac }) {
     }
   });
   if (n === 0) throw new Error('No frames could be decoded.\n' + lastLog());
-  const lapOut = lap.slice(0, n), sobOut = sob.slice(0, n);
-  const msg = { type: 'scores', lap: lapOut, sob: sobOut, frames: n, seconds: (performance.now() - t0) / 1000,
+  const lapOut = lap.slice(0, n), sobOut = sob.slice(0, n), cxOut = cx.slice(0, n), cyOut = cy.slice(0, n);
+  const msg = { type: 'scores', lap: lapOut, sob: sobOut, cx: cxOut, cy: cyOut, frames: n, seconds: (performance.now() - t0) / 1000,
     bgCount, bg: bg ? bg.slice() : null };
-  post(msg, [lapOut.buffer, sobOut.buffer].concat(msg.bg ? [msg.bg.buffer] : []));
+  post(msg, [lapOut.buffer, sobOut.buffer, cxOut.buffer, cyOut.buffer].concat(msg.bg ? [msg.bg.buffer] : []));
 }
 
 /* ---------- export ---------- */
@@ -292,7 +334,7 @@ function clearWork() {
   for (const name of FS.readdir('/work')) if (name !== '.' && name !== '..') { try { FS.unlink('/work/' + name); } catch (e) {} }
 }
 
-function exportFrames({ indices, format, quality, csv, baseName, fps }) {
+function exportFrames({ indices, format, quality, csv, extraFiles, baseName, fps }) {
   clearWork();
   const sel = selectExpr(indices);
   const total = indices.length;
@@ -335,6 +377,7 @@ function exportFrames({ indices, format, quality, csv, baseName, fps }) {
       if (k % 20 === 0) post({ type: 'progress', phase: 'zip', done: k + 1, total: files.length });
     });
     if (csv) zip.add(`${baseName}_in_focus/focus_scores.csv`, new TextEncoder().encode(csv));
+    for (const f of extraFiles || []) zip.add(`${baseName}_in_focus/${f.name}`, new TextEncoder().encode(f.text));
     return { name: baseName + '_in_focus.zip', data: zip.finish(), count: files.length };
   } finally {
     core.setLogger(({ message }) => { logLines.push(message); if (logLines.length > 400) logLines.shift(); });
