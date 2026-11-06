@@ -19,6 +19,10 @@ shows its average score, and the subject's average velocity (linear fit of posit
 and acceleration (2x the quadratic coefficient) from the tracked centroid of its strongest
 edges. Click the chart to identify the frame at that point.
 
+Export: one MP4 clip per in-focus block (ZIP, encoded in a single pass and split at block
+starts), a single block's clip from its table row, image ZIPs, or one combined MP4. Clips can
+be slowed to 1/2, 1/4 or 1/10 speed.
+
 Method: grayscale → subtract a median background built from keyframes → Laplacian
 (or Sobel) response → score = mean of the strongest 0.05% of responses. Auto threshold
 is Otsu's method on log scores. Frames scoring at or above the threshold are exported.

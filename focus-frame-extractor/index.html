@@ -125,6 +125,7 @@ tbody tr:hover { background: var(--peak-soft); }
 tbody tr.sel { background: var(--peak-soft); box-shadow: inset 3px 0 0 var(--peak); }
 th .unit { text-transform: none; letter-spacing: 0; font-weight: 400; }
 td.neg { color: var(--muted); }
+td button.clip { font-size: 12px; padding: 3px 9px; white-space: nowrap; }
 .chart-tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 6px 9px; font: 12px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.12); z-index: 2; }
 .chart-tip b { font-weight: 500; color: var(--peak); }
 .picked { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); font: 13px var(--font-mono); font-variant-numeric: tabular-nums; min-width: 0; }
@@ -277,7 +278,7 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
     </div>
     <p class="subhead">In-focus blocks · average velocity and acceleration of the subject</p>
     <div class="segments"><table>
-      <thead><tr><th>Block</th><th>Frames</th><th>Start (s)</th><th>End (s)</th><th>Duration (s)</th><th>Avg score</th><th>Peak frame</th><th>Velocity x <span class="unit u-v"></span></th><th>Velocity y <span class="unit u-v"></span></th><th>Speed <span class="unit u-v"></span></th><th>Accel. x <span class="unit u-a"></span></th><th>Accel. y <span class="unit u-a"></span></th></tr></thead>
+      <thead><tr><th>Block</th><th>Frames</th><th>Start (s)</th><th>End (s)</th><th>Duration (s)</th><th>Avg score</th><th>Peak frame</th><th>Velocity x <span class="unit u-v"></span></th><th>Velocity y <span class="unit u-v"></span></th><th>Speed <span class="unit u-v"></span></th><th>Accel. x <span class="unit u-a"></span></th><th>Accel. y <span class="unit u-a"></span></th><th>Clip</th></tr></thead>
       <tbody id="segBody"></tbody>
     </table></div>
     <details>
@@ -289,23 +290,32 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
 
   <!-- 5. Export -->
   <section class="panel" aria-labelledby="h-ex">
-    <div class="panel-head"><h2 id="h-ex"><b>5</b>Download in-focus frames</h2></div>
+    <div class="panel-head"><h2 id="h-ex"><b>5</b>Download in-focus clips and frames</h2></div>
     <div class="row">
       <label class="field">File
         <select id="format">
+          <option value="clips" selected>One MP4 clip per in-focus block (ZIP)</option>
           <option value="jpg">ZIP of JPEG frames</option>
           <option value="png">ZIP of PNG frames (lossless)</option>
-          <option value="mp4">MP4 video of kept frames only</option>
+          <option value="mp4">One MP4 of all kept frames, back to back</option>
         </select>
       </label>
-      <label class="check" style="padding-bottom: 8px"><input type="checkbox" id="withCsv" checked> Include scores + block CSVs (ZIP only)</label>
+      <label class="field" id="speedField">Clip speed
+        <select id="clipSpeed">
+          <option value="1" selected>Real time</option>
+          <option value="0.5">½ speed</option>
+          <option value="0.25">¼ speed</option>
+          <option value="0.1">1/10 speed</option>
+        </select>
+      </label>
+      <label class="check" style="padding-bottom: 8px"><input type="checkbox" id="withCsv" checked> Include scores + block CSVs (ZIPs only)</label>
       <div class="row" style="margin-left:auto">
         <button type="button" id="csvOnly" disabled>Download scores CSV</button>
         <button type="button" id="blocksCsv" disabled>Download block summary CSV</button>
         <button class="primary" type="button" id="build" disabled>Build file</button>
       </div>
     </div>
-    <p class="hint" id="exportHint">Analyze a video first. Frames are named by their original frame number and timestamp, for example <span class="mono">frame_000202_t6.733s.jpg</span>.</p>
+    <p class="hint" id="exportHint">Analyze a video first. Each block becomes its own clip, named by block number, frame range and start time, for example <span class="mono">block02_f000190-000245_t6.333s.mp4</span>. You can also save a single block's clip from the table above.</p>
     <div class="progress" id="exProg" hidden><div class="bar" id="exBar"><i></i></div><div class="status" id="exStatus"></div></div>
     <div class="export-done" id="exDone" hidden><span id="exInfo" class="mono"></span><button class="primary" type="button" id="save">Save file</button></div>
     <p class="error" id="exErr" hidden></p>
@@ -612,7 +622,7 @@ async function runAnalysis() {
     autoThreshold();
     updateRoiReadout();
     $('build').disabled = false; $('csvOnly').disabled = false; $('blocksCsv').disabled = !S.segments.length;
-    $('exportHint').textContent = 'Frames are named by their original frame number and timestamp, for example frame_000202_t6.733s.jpg.';
+    $('exportHint').textContent = 'Clips are named by block number, frame range and start time (for example block02_f000190-000245_t6.333s.mp4); image frames by their frame number and timestamp. Use “Save clip” in the table above for a single block.';
   } catch (e) {
     if (e.message !== 'cancelled') { $('anErr').hidden = false; $('anErr').textContent = e.message; }
     $('anProg').hidden = true;
@@ -621,6 +631,7 @@ async function runAnalysis() {
 function setBusyUi(b) {
   $('analyze').disabled = b || !S.info; $('build').disabled = b || !S.scores || S.scores.example;
   $('blocksCsv').disabled = b || !S.scores || S.scores.example || !S.segments.length;
+  document.querySelectorAll('td button.clip').forEach((el) => { el.disabled = b; });
   $('cancel').hidden = !b; $('pick').disabled = b; $('file').disabled = b;
 }
 let progT0 = 0;
@@ -635,11 +646,27 @@ function onProgress(m) {
     $('anStatus').textContent = `Scoring frame ${fmtNum(m.done)} of ${fmtNum(m.total)} · ${Math.round(rate)} frames/s · about ${Math.max(0, Math.ceil(eta))} s left`;
     return;
   }
+  if (m.phase === 'clips') {
+    $('exBar').className = 'bar'; $('exBar').firstElementChild.style.width = (m.done / Math.max(1, m.total) * 100).toFixed(1) + '%';
+    $('exStatus').textContent = `Encoding clip ${fmtNum(Math.min(m.done + 1, m.total))} of ${fmtNum(m.total)}…`;
+    return;
+  }
   if (m.phase === 'export' || m.phase === 'zip') {
     const f = Math.min(1, m.done / Math.max(1, m.total));
     $('exBar').className = 'bar'; $('exBar').firstElementChild.style.width = (f * 100).toFixed(1) + '%';
     $('exStatus').textContent = m.phase === 'zip' ? `Packing ${fmtNum(m.done)} of ${fmtNum(m.total)} frames…` : `Extracting frame ${fmtNum(m.done)} of ${fmtNum(m.total)}…`;
   }
+}
+// ffmpeg.wasm's H.264 encoder leaks memory on every run, so restart the decoder
+// after a few encodes (sooner for large frames). Results live on this page, so nothing is lost.
+async function afterEncode() {
+  S.encodes = (S.encodes || 0) + 1;
+  const limit = Math.max(1, Math.floor(3e6 / (S.info.width * S.info.height)));
+  if (S.encodes < limit) return;
+  S.encodes = 0;
+  S.worker.terminate(); S.worker = null; S.ready = false; S.startP = null; frameReq.busy = false;
+  await ensureWorker();
+  await call({ type: 'open', file: S.file }, 'info');
 }
 async function cancelWork() {
   if (!S.worker) return;
@@ -803,6 +830,16 @@ function renderBlocks() {
     const cells = [k + 1, `${g.a}–${g.b}`, (g.a / fps).toFixed(3), ((g.b + 1) / fps).toFixed(3), ((g.b - g.a + 1) / fps).toFixed(3),
       g.mean.toFixed(1), g.peak, fmtMotion(m.vx), fmtMotion(m.vy), fmtMotion(m.speed), fmtMotion(m.ax), fmtMotion(m.ay)];
     for (const c of cells) { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); }
+    const td = document.createElement('td');
+    if (S.scores.example) td.textContent = '—';
+    else {
+      const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'clip'; btn.textContent = 'Save clip';
+      btn.disabled = S.busy; btn.setAttribute('aria-label', `Save video clip of block ${k + 1}`);
+      btn.addEventListener('click', (e) => { e.stopPropagation(); saveBlockClip(k, btn); });
+      btn.addEventListener('keydown', (e) => e.stopPropagation());
+      td.appendChild(btn);
+    }
+    tr.appendChild(td);
     tr.tabIndex = 0;
     if (S.blockOf && S.blockOf[S.idx] === k) tr.classList.add('sel');
     tr.addEventListener('click', () => goTo(g.peak));
@@ -810,7 +847,7 @@ function renderBlocks() {
     frag.appendChild(tr);
   });
   body.appendChild(frag);
-  if (!S.segments.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 12; td.textContent = 'No frames reach this threshold.'; td.style.textAlign = 'left'; tr.appendChild(td); body.appendChild(tr); }
+  if (!S.segments.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 13; td.textContent = 'No frames reach this threshold.'; td.style.textAlign = 'left'; tr.appendChild(td); body.appendChild(tr); }
 }
 function highlightBlockRow(scroll) {
   const k = S.blockOf ? S.blockOf[S.idx] : -1;
@@ -1032,11 +1069,16 @@ $('build').addEventListener('click', async () => {
   $('exErr').hidden = true; $('exDone').hidden = true; $('exProg').hidden = false; $('exBar').className = 'bar indet'; $('exStatus').textContent = 'Starting…';
   const format = $('format').value, withCsv = format !== 'mp4' && $('withCsv').checked;
   try {
-    const r = await call({ type: 'export', indices, format, csv: withCsv ? scoresCsv() : null,
-      extraFiles: withCsv ? [{ name: 'blocks.csv', text: blocksCsv() }] : [], baseName: baseName(), fps: S.info.fps }, 'exported');
+    const msg = format === 'clips'
+      ? { type: 'export', format, blocks: S.segments.map((g, k) => ({ a: g.a, b: g.b, name: clipName(k) })), speed: +$('clipSpeed').value,
+          extraFiles: withCsv ? [{ name: 'blocks.csv', text: blocksCsv() }, { name: 'focus_scores.csv', text: scoresCsv() }] : [], baseName: baseName() }
+      : { type: 'export', indices, format, csv: withCsv ? scoresCsv() : null,
+          extraFiles: withCsv ? [{ name: 'blocks.csv', text: blocksCsv() }] : [], baseName: baseName(), fps: S.info.fps * (format === 'mp4' ? +$('clipSpeed').value : 1) };
+    const r = await call(msg, 'exported');
     S.exportBlob = r.blob; S.exportName = r.name;
     $('exProg').hidden = true; $('exDone').hidden = false;
-    $('exInfo').textContent = `${r.name} · ${fmtNum(r.count)} frames · ${fmtBytes(r.size)}`;
+    $('exInfo').textContent = `${r.name} · ${fmtNum(r.count)} ${format === 'clips' ? 'clips' : 'frames'} · ${fmtBytes(r.size)}`;
+    if (format === 'clips' || format === 'mp4') await afterEncode();
   } catch (e) {
     $('exProg').hidden = true;
     if (e.message !== 'cancelled') { $('exErr').hidden = false; $('exErr').textContent = e.message; }
@@ -1045,7 +1087,36 @@ $('build').addEventListener('click', async () => {
 $('save').addEventListener('click', () => saveFile(S.exportName, S.exportBlob));
 $('csvOnly').addEventListener('click', () => { if (S.scores && !S.scores.example) saveFile(baseName() + '_focus_scores.csv', new Blob([scoresCsv()], { type: 'text/csv' })); });
 $('blocksCsv').addEventListener('click', () => { if (S.scores && !S.scores.example) saveFile(baseName() + '_focus_blocks.csv', new Blob([blocksCsv()], { type: 'text/csv' })); });
-$('format').addEventListener('change', () => { $('withCsv').disabled = $('format').value === 'mp4'; $('exDone').hidden = true; });
+function syncFormatUi() {
+  const f = $('format').value;
+  $('withCsv').disabled = f === 'mp4';
+  $('speedField').hidden = !(f === 'mp4' || f === 'clips');
+}
+$('format').addEventListener('change', () => { syncFormatUi(); $('exDone').hidden = true; });
+syncFormatUi();
+function clipName(k) {
+  const g = S.segments[k], fps = S.scores.fps, sp = +$('clipSpeed').value;
+  return `block${String(k + 1).padStart(2, '0')}_f${String(g.a).padStart(6, '0')}-${String(g.b).padStart(6, '0')}_t${(g.a / fps).toFixed(3)}s${sp !== 1 ? `_${sp}x` : ''}.mp4`;
+}
+async function saveBlockClip(k, btn) {
+  if (S.busy || !S.segments[k]) return;
+  const g = S.segments[k];
+  S.busy = true; setBusyUi(true);
+  btn.textContent = 'Encoding…';
+  $('exErr').hidden = true;
+  try {
+    const name = baseName() + '_' + clipName(k);
+    const r = await call({ type: 'export', format: 'clip', blocks: [{ a: g.a, b: g.b, name }], speed: +$('clipSpeed').value, baseName: baseName() }, 'exported');
+    await afterEncode();
+    btn.textContent = 'Save clip';
+    await saveFile(r.name, r.blob);
+  } catch (e) {
+    btn.textContent = 'Save clip';
+    if (e.message !== 'cancelled') { $('exErr').hidden = false; $('exErr').textContent = e.message; }
+  } finally {
+    S.busy = false; setBusyUi(false); pumpFrame();
+  }
+}
 
 let downloadsApi;
 async function getDownloads() {

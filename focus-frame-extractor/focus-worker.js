@@ -384,6 +384,69 @@ function exportFrames({ indices, format, quality, csv, extraFiles, baseName, fps
   }
 }
 
+/* ---------- one clip per in-focus block ---------- */
+
+// Encode frames a..b as an H.264 MP4 using a fast seek to the block start.
+function encodeClip(a, b, outFps, crf) {
+  const out = '/work/clip.mp4';
+  try { FS.unlink(out); } catch (e) {}
+  const t = Math.max(0, info.startTime + (a - 0.25) / info.fps);
+  const n = b - a + 1;
+  const ret = ffmpeg(['-ss', t.toFixed(6), '-i', inputPath, '-map', '0:v:0', '-an', '-sn', '-dn', '-frames:v', String(n),
+    '-vf', `setpts=N/(${outFps.toFixed(6)}*TB),scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
+    '-fps_mode', 'passthrough', '-r', String(outFps), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(crf || 18),
+    '-movflags', '+faststart', '-y', out]);
+  let data;
+  try { data = FS.readFile(out); } catch (e) { data = null; }
+  if (!data || (ret !== 0 && data.length < 1000)) throw new Error(`Block starting at frame ${a} could not be encoded.\n` + lastLog());
+  FS.unlink(out);
+  return data;
+}
+
+function exportClips({ blocks, speed, crf, extraFiles, baseName, single }) {
+  clearWork();
+  const outFps = info.fps * (speed || 1);
+  if (single) {
+    const g = blocks[0];
+    return { name: g.name, data: encodeClip(g.a, g.b, outFps, crf), count: 1 };
+  }
+  // One decode + one encoder for every block: select the block frames, force a keyframe at
+  // the first frame of each block, and let the segment muxer cut a new file there.
+  const indices = [];
+  for (const g of blocks) for (let i = g.a; i <= g.b; i++) indices.push(i);
+  const starts = []; let acc = 0;
+  for (const g of blocks) { starts.push(acc); acc += g.b - g.a + 1; }
+  const total = acc;
+  let lastPost = 0;
+  core.setLogger(({ message }) => {
+    logLines.push(message); if (logLines.length > 400) logLines.shift();
+    const m = /frame=\s*(\d+)/.exec(message); const now = performance.now();
+    if (m && now - lastPost > 150) { lastPost = now; post({ type: 'progress', phase: 'export', done: Math.min(total, +m[1]), total }); }
+  });
+  try {
+    post({ type: 'progress', phase: 'export', done: 0, total });
+    ffmpeg(['-i', inputPath, '-map', '0:v:0', '-an', '-sn', '-dn',
+      '-vf', `select='${selectExpr(indices)}',setpts=N/(${outFps.toFixed(6)}*TB),scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
+      '-fps_mode', 'passthrough', '-r', String(outFps), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(crf || 18),
+      '-force_key_frames', 'expr:' + starts.map((n) => `eq(n,${n})`).join('+'),
+      '-f', 'segment', '-segment_frames', starts.slice(1).join(',') || String(total + 1), '-reset_timestamps', '1',
+      '-segment_format', 'mp4', '-segment_format_options', 'movflags=+faststart', '-stats_period', '0.25',
+      '-y', '/work/seg_%04d.mp4']);
+  } finally {
+    core.setLogger(({ message }) => { logLines.push(message); if (logLines.length > 400) logLines.shift(); });
+  }
+  const files = FS.readdir('/work').filter((n) => n.startsWith('seg_')).sort();
+  if (files.length !== blocks.length) throw new Error(`Expected ${blocks.length} clips but the encoder produced ${files.length}.\n` + lastLog());
+  const zip = new ZipWriter();
+  files.forEach((f, k) => {
+    zip.add(`${baseName}_block_clips/${blocks[k].name}`, FS.readFile('/work/' + f));
+    FS.unlink('/work/' + f);
+    post({ type: 'progress', phase: 'zip', done: k + 1, total: files.length });
+  });
+  for (const f of extraFiles || []) zip.add(`${baseName}_block_clips/${f.name}`, new TextEncoder().encode(f.text));
+  return { name: baseName + '_block_clips.zip', data: zip.finish(), count: blocks.length };
+}
+
 /* ---------- minimal ZIP (stored) ---------- */
 
 const CRC_TABLE = (() => {
@@ -438,9 +501,9 @@ self.onmessage = (ev) => {
       }
       else if (m.type === 'analyze') analyze(m);
       else if (m.type === 'export') {
-        const r = exportFrames(m);
+        const r = m.format === 'clips' || m.format === 'clip' ? exportClips({ ...m, single: m.format === 'clip' }) : exportFrames(m);
         const blob = r.data instanceof Blob ? r.data : new Blob([r.data]);
-        post({ type: 'exported', name: r.name, blob, size: blob.size, count: r.count || m.indices.length, format: m.format });
+        post({ type: 'exported', name: r.name, blob, size: blob.size, count: r.count || m.indices.length, format: m.format, heap: core.HEAPU8 ? core.HEAPU8.length : 0 });
       }
     } catch (e) {
       post({ type: 'error', op: m.type, id: m.id, message: (e && e.message) || String(e) });
