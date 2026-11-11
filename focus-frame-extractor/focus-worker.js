@@ -10,6 +10,7 @@ let inputPath = null;     // path of the mounted video
 let info = null;          // probe result
 let sink = null;          // receives bytes written to /dev/frames
 let logLines = [];
+let fontOk = false;       // label font loaded into /fonts for burned-in frame numbers
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 
@@ -47,6 +48,11 @@ async function loadEngine(base) {
   });
   FS.mkdev('/dev/frames', 0o666, dev);
   FS.mkdir('/work');
+  // Font for burned-in frame labels (drawtext needs a real font file).
+  try {
+    const f = await fetch(new URL('label-font.ttf', base).href);
+    if (f.ok) { FS.mkdir('/fonts'); FS.writeFile('/fonts/label.ttf', new Uint8Array(await f.arrayBuffer())); fontOk = true; }
+  } catch (e) { fontOk = false; }
 }
 
 function concat(chunks, len) {
@@ -334,7 +340,7 @@ function clearWork() {
   for (const name of FS.readdir('/work')) if (name !== '.' && name !== '..') { try { FS.unlink('/work/' + name); } catch (e) {} }
 }
 
-function exportFrames({ indices, format, quality, csv, extraFiles, baseName, fps }) {
+function exportFrames({ indices, format, quality, csv, extraFiles, baseName, fps, burn }) {
   clearWork();
   const sel = selectExpr(indices);
   const total = indices.length;
@@ -352,7 +358,7 @@ function exportFrames({ indices, format, quality, csv, extraFiles, baseName, fps
       const out = '/work/out.mp4';
       const outFps = fps || info.fps;
       const ret = ffmpeg(['-i', inputPath, '-map', '0:v:0', '-an', '-sn', '-dn',
-        '-vf', `select='${sel}',setpts=N/(${outFps.toFixed(6)}*TB),scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
+        '-vf', `${burn ? labelFilter(0, -info.startTime) : ''}select='${sel}',setpts=N/(${outFps.toFixed(6)}*TB),scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
         '-fps_mode', 'passthrough', '-r', String(outFps), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(quality || 18),
         '-movflags', '+faststart', '-stats_period', '0.25', '-y', out]);
       let data;
@@ -384,16 +390,30 @@ function exportFrames({ indices, format, quality, csv, extraFiles, baseName, fps
   }
 }
 
+/* ---------- burned-in labels ---------- */
+
+// drawtext filter that prints the ORIGINAL frame number and timestamp in the top-left corner.
+// frameOffset/timeOffset convert the filter's own counters back to source frame and time.
+function labelFilter(frameOffset, timeOffset) {
+  if (!fontOk) return '';
+  const size = Math.max(14, Math.min(64, Math.round(info.height * 0.085)));
+  const pad = Math.round(size * 0.35), margin = Math.round(size * 0.6);
+  const text = `frame %{eif\\:n+${frameOffset}\\:d\\:6}   %{pts\\:hms\\:${timeOffset.toFixed(6)}}`;
+  return `drawtext=fontfile=/fonts/label.ttf:text='${text}':fontsize=${size}:fontcolor=white` +
+    `:box=1:boxcolor=black@0.6:boxborderw=${pad}:x=${margin}:y=${margin},`;
+}
+
 /* ---------- one clip per in-focus block ---------- */
 
 // Encode frames a..b as an H.264 MP4 using a fast seek to the block start.
-function encodeClip(a, b, outFps, crf) {
+function encodeClip(a, b, outFps, crf, burn) {
   const out = '/work/clip.mp4';
   try { FS.unlink(out); } catch (e) {}
   const t = Math.max(0, info.startTime + (a - 0.25) / info.fps);
   const n = b - a + 1;
   const ret = ffmpeg(['-ss', t.toFixed(6), '-i', inputPath, '-map', '0:v:0', '-an', '-sn', '-dn', '-frames:v', String(n),
-    '-vf', `setpts=N/(${outFps.toFixed(6)}*TB),scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
+    // After a fast seek the filter counters restart at 0, so offset them by the block's first frame.
+    '-vf', `${burn ? labelFilter(a, a / info.fps) : ''}setpts=N/(${outFps.toFixed(6)}*TB),scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
     '-fps_mode', 'passthrough', '-r', String(outFps), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(crf || 18),
     '-movflags', '+faststart', '-y', out]);
   let data;
@@ -403,12 +423,12 @@ function encodeClip(a, b, outFps, crf) {
   return data;
 }
 
-function exportClips({ blocks, speed, crf, extraFiles, baseName, single }) {
+function exportClips({ blocks, speed, crf, extraFiles, baseName, single, burn }) {
   clearWork();
   const outFps = info.fps * (speed || 1);
   if (single) {
     const g = blocks[0];
-    return { name: g.name, data: encodeClip(g.a, g.b, outFps, crf), count: 1 };
+    return { name: g.name, data: encodeClip(g.a, g.b, outFps, crf, burn), count: 1 };
   }
   // One decode + one encoder for every block: select the block frames, force a keyframe at
   // the first frame of each block, and let the segment muxer cut a new file there.
@@ -426,7 +446,8 @@ function exportClips({ blocks, speed, crf, extraFiles, baseName, single }) {
   try {
     post({ type: 'progress', phase: 'export', done: 0, total });
     ffmpeg(['-i', inputPath, '-map', '0:v:0', '-an', '-sn', '-dn',
-      '-vf', `select='${selectExpr(indices)}',setpts=N/(${outFps.toFixed(6)}*TB),scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
+      // Labels go before select, where the filter's frame counter is still the source frame number.
+      '-vf', `${burn ? labelFilter(0, -info.startTime) : ''}select='${selectExpr(indices)}',setpts=N/(${outFps.toFixed(6)}*TB),scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p`,
       '-fps_mode', 'passthrough', '-r', String(outFps), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(crf || 18),
       '-force_key_frames', 'expr:' + starts.map((n) => `eq(n,${n})`).join('+'),
       '-f', 'segment', '-segment_frames', starts.slice(1).join(',') || String(total + 1), '-reset_timestamps', '1',
@@ -493,7 +514,7 @@ self.onmessage = (ev) => {
   const m = ev.data;
   queue = queue.then(async () => {
     try {
-      if (m.type === 'init') { await loadEngine(m.base); post({ type: 'ready' }); }
+      if (m.type === 'init') { await loadEngine(m.base); post({ type: 'ready', fontOk }); }
       else if (m.type === 'open') { mountFile(m.file); post({ type: 'info', info: probe(m.file.name, m.file.size) }); }
       else if (m.type === 'frame') {
         const rgba = grabFrame(m.index);

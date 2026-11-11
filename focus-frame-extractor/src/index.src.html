@@ -308,6 +308,7 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
           <option value="0.1">1/10 speed</option>
         </select>
       </label>
+      <label class="check" id="burnField" style="padding-bottom: 8px"><input type="checkbox" id="burn" checked> Burn frame number + time into videos</label>
       <label class="check" style="padding-bottom: 8px"><input type="checkbox" id="withCsv" checked> Include scores + block CSVs (ZIPs only)</label>
       <div class="row" style="margin-left:auto">
         <button type="button" id="csvOnly" disabled>Download scores CSV</button>
@@ -383,7 +384,10 @@ function onWorker(m) {
   if (m.type === 'frame') { onFrame(m); return; }
   if (m.type === 'error' && m.op === 'frame') { frameReq.busy = false; pumpFrame(); return; }
   if (m.type === 'error' && m.op === 'init') { workerFailed = true; setEngine('err', 'Decoder unavailable'); }
-  if (m.type === 'ready') { S.ready = true; setEngine('ok', 'Decoder ready (ffmpeg, WebAssembly)'); }
+  if (m.type === 'ready') {
+    S.ready = true; setEngine('ok', 'Decoder ready (ffmpeg, WebAssembly)');
+    if (m.fontOk === false) { $('burn').checked = false; $('burn').disabled = true; $('burnField').title = 'The label font could not be loaded, so frame numbers can\'t be burned in.'; }
+  }
   if (pending && (m.type === pending.type || m.type === 'error')) {
     const p = pending; pending = null;
     if (m.type === 'error') p.reject(new Error(m.message)); else p.resolve(m);
@@ -1070,10 +1074,11 @@ $('build').addEventListener('click', async () => {
   const format = $('format').value, withCsv = format !== 'mp4' && $('withCsv').checked;
   try {
     const msg = format === 'clips'
-      ? { type: 'export', format, blocks: S.segments.map((g, k) => ({ a: g.a, b: g.b, name: clipName(k) })), speed: +$('clipSpeed').value,
+      ? { type: 'export', format, blocks: S.segments.map((g, k) => ({ a: g.a, b: g.b, name: clipName(k) })), speed: +$('clipSpeed').value, burn: $('burn').checked,
           extraFiles: withCsv ? [{ name: 'blocks.csv', text: blocksCsv() }, { name: 'focus_scores.csv', text: scoresCsv() }] : [], baseName: baseName() }
       : { type: 'export', indices, format, csv: withCsv ? scoresCsv() : null,
-          extraFiles: withCsv ? [{ name: 'blocks.csv', text: blocksCsv() }] : [], baseName: baseName(), fps: S.info.fps * (format === 'mp4' ? +$('clipSpeed').value : 1) };
+          extraFiles: withCsv ? [{ name: 'blocks.csv', text: blocksCsv() }] : [], baseName: baseName(), fps: S.info.fps * (format === 'mp4' ? +$('clipSpeed').value : 1),
+          burn: format === 'mp4' && $('burn').checked };
     const r = await call(msg, 'exported');
     S.exportBlob = r.blob; S.exportName = r.name;
     $('exProg').hidden = true; $('exDone').hidden = false;
@@ -1091,6 +1096,7 @@ function syncFormatUi() {
   const f = $('format').value;
   $('withCsv').disabled = f === 'mp4';
   $('speedField').hidden = !(f === 'mp4' || f === 'clips');
+  $('burnField').hidden = $('speedField').hidden;
 }
 $('format').addEventListener('change', () => { syncFormatUi(); $('exDone').hidden = true; });
 syncFormatUi();
@@ -1106,7 +1112,7 @@ async function saveBlockClip(k, btn) {
   $('exErr').hidden = true;
   try {
     const name = baseName() + '_' + clipName(k);
-    const r = await call({ type: 'export', format: 'clip', blocks: [{ a: g.a, b: g.b, name }], speed: +$('clipSpeed').value, baseName: baseName() }, 'exported');
+    const r = await call({ type: 'export', format: 'clip', blocks: [{ a: g.a, b: g.b, name }], speed: +$('clipSpeed').value, burn: $('burn').checked, baseName: baseName() }, 'exported');
     await afterEncode();
     btn.textContent = 'Save clip';
     await saveFile(r.name, r.blob);
