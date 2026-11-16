@@ -11,6 +11,15 @@ let info = null;          // probe result
 let sink = null;          // receives bytes written to /dev/frames
 let logLines = [];
 let fontOk = false;       // label font loaded into /fonts for burned-in frame numbers
+let fontBytes = null;
+let wasmModule = null;    // compiled once; every fresh ffmpeg instance reuses it
+let currentFile = null;   // the File mounted at /in, re-mounted after a rebuild
+let runs = 0;             // ffmpeg runs on the current instance
+
+// ffmpeg.wasm leaks memory outside its heap on every run and the tab crashes after
+// roughly 150 frame decodes or 40 encodes. Throwing the instance away and creating a
+// new one from the already-compiled module clears it and takes only a moment.
+const RUNS_PER_INSTANCE = 20;
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 
@@ -34,8 +43,26 @@ async function loadEngine(base) {
     const ds = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
     bytes = new Uint8Array(await new Response(ds).arrayBuffer());
   }
-  core = await self.createFFmpegCore({ wasmBinary: bytes.buffer });
+  wasmModule = await WebAssembly.compile(bytes);
+  bytes = null;
+  // Font for burned-in frame labels (drawtext needs a real font file).
+  try {
+    const f = await fetch(new URL('label-font.ttf', base).href);
+    if (f.ok) { fontBytes = new Uint8Array(await f.arrayBuffer()); fontOk = true; }
+  } catch (e) { fontOk = false; }
+  await buildCore();
+}
+
+async function buildCore() {
+  core = null; FS = null;
+  core = await self.createFFmpegCore({
+    instantiateWasm(imports, receive) {
+      WebAssembly.instantiate(wasmModule, imports).then((inst) => receive(inst, wasmModule));
+      return {};
+    },
+  });
   FS = core.FS;
+  runs = 0;
   core.setLogger(({ message }) => { logLines.push(message); if (logLines.length > 400) logLines.shift(); });
   core.setProgress(() => {});
   // A character device: everything ffmpeg writes to /dev/frames lands in `sink`.
@@ -48,11 +75,12 @@ async function loadEngine(base) {
   });
   FS.mkdev('/dev/frames', 0o666, dev);
   FS.mkdir('/work');
-  // Font for burned-in frame labels (drawtext needs a real font file).
-  try {
-    const f = await fetch(new URL('label-font.ttf', base).href);
-    if (f.ok) { FS.mkdir('/fonts'); FS.writeFile('/fonts/label.ttf', new Uint8Array(await f.arrayBuffer())); fontOk = true; }
-  } catch (e) { fontOk = false; }
+  if (fontBytes) { FS.mkdir('/fonts'); FS.writeFile('/fonts/label.ttf', fontBytes); }
+  if (currentFile) mountFile(currentFile);
+}
+
+async function maybeRebuild(force) {
+  if (core && (force || runs >= RUNS_PER_INSTANCE)) await buildCore();
 }
 
 function concat(chunks, len) {
@@ -62,6 +90,7 @@ function concat(chunks, len) {
 }
 
 function ffmpeg(args) {
+  runs++;
   logLines = [];
   core.setTimeout(-1);
   core.exec(...args);
@@ -77,6 +106,7 @@ function lastLog(n = 6) {
 /* ---------- open + probe ---------- */
 
 function mountFile(file) {
+  currentFile = file;
   try { FS.unmount('/in'); } catch (e) {}
   try { FS.rmdir('/in'); } catch (e) {}
   FS.mkdir('/in');
@@ -95,6 +125,7 @@ function parseRate(s) {
 function probe(fileName, fileSize) {
   try { FS.unlink('/work/probe.json'); } catch (e) {}
   logLines = [];
+  runs++;
   core.ffprobe('-v', 'error', '-print_format', 'json', '-show_format', '-show_streams',
     '-select_streams', 'v:0', '-o', '/work/probe.json', inputPath);
   core.reset();
@@ -286,6 +317,38 @@ function makeScorer(W, H, roi, bg, kFrac) {
   };
 }
 
+/* Low-resolution grayscale copy of every frame for instant scrubbing, sized so the whole
+   video fits in about 96 MB. Each proxy pixel is the average of the source block it covers. */
+function makeProxy(W, H, cap) {
+  const per = 96e6 / cap;
+  let pw = Math.min(W, 640, Math.floor(Math.sqrt(per * W / H)));
+  pw = Math.max(16, pw);
+  const ph = Math.max(4, Math.round(pw * H / W));
+  cap = Math.min(cap, Math.floor(160e6 / (pw * ph)));
+  const data = new Uint8Array(cap * pw * ph);
+  const colOf = new Uint16Array(W);
+  for (let x = 0; x < W; x++) colOf[x] = Math.min(pw - 1, Math.floor(x * pw / W));
+  const rowStart = new Int32Array(ph + 1);
+  for (let r = 0; r <= ph; r++) rowStart[r] = Math.round(r * H / ph);
+  const colCount = new Uint32Array(pw);
+  for (let x = 0; x < W; x++) colCount[colOf[x]]++;
+  const acc = new Uint32Array(pw);
+  return {
+    pw, ph, cap, data,
+    add(g, i) {
+      if (i >= cap) return;
+      const base = i * pw * ph;
+      for (let r = 0; r < ph; r++) {
+        acc.fill(0);
+        const y0 = rowStart[r], y1 = rowStart[r + 1];
+        for (let y = y0; y < y1; y++) { const o = y * W; for (let x = 0; x < W; x++) acc[colOf[x]] += g[o + x]; }
+        const rows = Math.max(1, y1 - y0), o2 = base + r * pw;
+        for (let c = 0; c < pw; c++) data[o2 + c] = acc[c] / (colCount[c] * rows);
+      }
+    },
+  };
+}
+
 function analyze({ roi, bgSub, kFrac }) {
   const W = info.width, H = info.height, N = W * H;
   const t0 = performance.now();
@@ -296,6 +359,7 @@ function analyze({ roi, bgSub, kFrac }) {
     bg = r.bg; bgCount = r.count;
   }
   const scorer = makeScorer(W, H, roi, bg, kFrac);
+  const prox = makeProxy(W, H, Math.max(16, Math.ceil(info.frames * 1.05) + 16));
   let cap = Math.max(16, Math.ceil(info.frames * 1.05) + 16);
   let lap = new Float32Array(cap), sob = new Float32Array(cap), cx = new Float32Array(cap), cy = new Float32Array(cap);
   const grow = (arr) => { const a = new Float32Array(cap); a.set(arr); return a; };
@@ -307,6 +371,7 @@ function analyze({ roi, bgSub, kFrac }) {
       lap = grow(lap); sob = grow(sob); cx = grow(cx); cy = grow(cy);
     }
     const s = scorer(g); lap[i] = s[0]; sob[i] = s[1]; cx[i] = s[2]; cy[i] = s[3];
+    prox.add(g, i);
     const now = performance.now();
     if (now - lastPost > 120) {
       lastPost = now;
@@ -315,9 +380,10 @@ function analyze({ roi, bgSub, kFrac }) {
   });
   if (n === 0) throw new Error('No frames could be decoded.\n' + lastLog());
   const lapOut = lap.slice(0, n), sobOut = sob.slice(0, n), cxOut = cx.slice(0, n), cyOut = cy.slice(0, n);
+  const proxy = { data: prox.data, w: prox.pw, h: prox.ph, n: Math.min(n, prox.cap) };
   const msg = { type: 'scores', lap: lapOut, sob: sobOut, cx: cxOut, cy: cyOut, frames: n, seconds: (performance.now() - t0) / 1000,
-    bgCount, bg: bg ? bg.slice() : null };
-  post(msg, [lapOut.buffer, sobOut.buffer, cxOut.buffer, cyOut.buffer].concat(msg.bg ? [msg.bg.buffer] : []));
+    bgCount, bg: bg ? bg.slice() : null, proxy };
+  post(msg, [lapOut.buffer, sobOut.buffer, cxOut.buffer, cyOut.buffer, prox.data.buffer].concat(msg.bg ? [msg.bg.buffer] : []));
 }
 
 /* ---------- export ---------- */
@@ -514,8 +580,9 @@ self.onmessage = (ev) => {
   const m = ev.data;
   queue = queue.then(async () => {
     try {
-      if (m.type === 'init') { await loadEngine(m.base); post({ type: 'ready', fontOk }); }
-      else if (m.type === 'open') { mountFile(m.file); post({ type: 'info', info: probe(m.file.name, m.file.size) }); }
+      if (m.type === 'init') { await loadEngine(m.base); post({ type: 'ready', fontOk }); return; }
+      await maybeRebuild(false);
+      if (m.type === 'open') { mountFile(m.file); post({ type: 'info', info: probe(m.file.name, m.file.size) }); }
       else if (m.type === 'frame') {
         const rgba = grabFrame(m.index);
         post({ type: 'frame', id: m.id, index: m.index, width: info.width, height: info.height, rgba }, [rgba.buffer]);
@@ -524,7 +591,8 @@ self.onmessage = (ev) => {
       else if (m.type === 'export') {
         const r = m.format === 'clips' || m.format === 'clip' ? exportClips({ ...m, single: m.format === 'clip' }) : exportFrames(m);
         const blob = r.data instanceof Blob ? r.data : new Blob([r.data]);
-        post({ type: 'exported', name: r.name, blob, size: blob.size, count: r.count || m.indices.length, format: m.format, heap: core.HEAPU8 ? core.HEAPU8.length : 0 });
+        runs += 3;   // encodes leak several times more than plain decodes
+        post({ type: 'exported', name: r.name, blob, size: blob.size, count: r.count || m.indices.length, format: m.format });
       }
     } catch (e) {
       post({ type: 'error', op: m.type, id: m.id, message: (e && e.message) || String(e) });

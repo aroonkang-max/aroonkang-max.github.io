@@ -381,8 +381,6 @@ function call(msg, type) {
 function onWorker(m) {
   if (m.type === 'engine-progress') { setEngine('busy', `Loading decoder… ${Math.round(m.loaded / m.total * 100)}%`); return; }
   if (m.type === 'progress') { onProgress(m); return; }
-  if (m.type === 'frame') { onFrame(m); return; }
-  if (m.type === 'error' && m.op === 'frame') { frameReq.busy = false; pumpFrame(); return; }
   if (m.type === 'error' && m.op === 'init') { workerFailed = true; setEngine('err', 'Decoder unavailable'); }
   if (m.type === 'ready') {
     S.ready = true; setEngine('ok', 'Decoder ready (ffmpeg, WebAssembly)');
@@ -397,6 +395,36 @@ async function ensureWorker() {
   if (S.worker && S.ready) return;
   if (!S.startP) S.startP = startWorker().catch((e) => { S.startP = null; throw e; });
   await S.startP;
+}
+
+/* A second decoder just for the frame viewer, so scrubbing keeps working while the
+   main one is busy analyzing or exporting. Requests are latest-wins. */
+const PV = { w: null, ready: false, startP: null, file: null };
+function startPreview() {
+  if (PV.startP) return PV.startP;
+  PV.startP = new Promise((resolve, reject) => {
+    const w = new Worker(new URL('focus-worker.js', document.baseURI));
+    PV.w = w; PV.ready = false; PV.file = null;
+    w.onmessage = (ev) => {
+      const m = ev.data;
+      if (m.type === 'ready') { PV.ready = true; resolve(); }
+      else if (m.type === 'info') { PV.file = PV.opening; PV.opening = null; pumpFrame(); }
+      else if (m.type === 'frame') onFrame(m);
+      else if (m.type === 'error') {
+        if (m.op === 'init') reject(new Error(m.message));
+        else if (m.op === 'frame') { frameReq.busy = false; pumpFrame(); }
+      }
+    };
+    w.onerror = (e) => { e.preventDefault(); reject(new Error(e.message || 'preview decoder failed')); };
+    w.postMessage({ type: 'init', base: document.baseURI });
+  }).catch((e) => { PV.startP = null; throw e; });
+  return PV.startP;
+}
+async function previewOpen(file) {
+  await startPreview();
+  frameReq.busy = false;
+  PV.opening = file; PV.file = null;
+  PV.w.postMessage({ type: 'open', file });
 }
 
 /* ---------- loading a file ---------- */
@@ -422,7 +450,8 @@ async function openFile(file) {
     $('openStatus').textContent = 'Reading file…';
     const r = await call({ type: 'open', file }, 'info');
     S.info = r.info;
-    S.roi = null; S.bg = null; S.analyzedRoi = undefined;
+    S.roi = null; S.bg = null; S.analyzedRoi = undefined; S.proxy = null; S.frameImg = null; S.frameIdx = null;
+    previewOpen(file).catch(() => {});
     renderSpecs();
     setupViewer();
     $('analyze').disabled = false;
@@ -488,19 +517,46 @@ function goTo(i) {
   $('frameReadout').textContent = `Frame ${fmtNum(S.idx)} · ${(S.idx / S.info.fps).toFixed(3)} s`;
   if (S.scores && !S.scores.example) { S.picked = S.idx; updatePicked(); highlightBlockRow(false); }
   updateBadge(); drawChart();
+  if (S.frameIdx !== S.idx) paintProxy(S.idx);
   frameReq.want = S.idx; pumpFrame();
 }
 function pumpFrame() {
-  if (frameReq.busy || frameReq.want == null || !S.ready || S.busy) return;
+  if (frameReq.busy || frameReq.want == null || !PV.ready || !S.file || PV.file !== S.file) return;
   const index = frameReq.want; frameReq.want = null; frameReq.busy = true;
-  S.worker.postMessage({ type: 'frame', index, id: index });
+  PV.w.postMessage({ type: 'frame', index, id: index });
 }
 function onFrame(m) {
   frameReq.busy = false;
-  S.frameImg = new ImageData(new Uint8ClampedArray(m.rgba.buffer), m.width, m.height);
-  S.frameIdx = m.index;
-  paintFrame();
+  // A full frame for a position the slider has already left: keep the instant preview
+  // of the current position on screen instead of jumping back.
+  const stale = m.index !== S.idx && hasProxy(S.idx);
+  if (!stale) {
+    S.frameImg = new ImageData(new Uint8ClampedArray(m.rgba.buffer), m.width, m.height);
+    S.frameIdx = m.index;
+    paintFrame();
+    setPreviewNote(false);
+  }
   pumpFrame();
+}
+/* Instant low-resolution preview from the analysis pass, shown while the full frame decodes. */
+const hasProxy = (i) => !!(S.proxy && i < S.proxy.n);
+let proxyCanvas = null;
+function paintProxy(i) {
+  if (!hasProxy(i)) return;
+  const { data, w, h } = S.proxy;
+  if (!proxyCanvas) proxyCanvas = document.createElement('canvas');
+  proxyCanvas.width = w; proxyCanvas.height = h;
+  const pc = proxyCanvas.getContext('2d'), img = pc.createImageData(w, h), d = img.data, base = i * w * h;
+  for (let k = 0, q = 0; k < w * h; k++, q += 4) { const v = data[base + k]; d[q] = d[q + 1] = d[q + 2] = v; d[q + 3] = 255; }
+  pc.putImageData(img, 0, 0);
+  cx.save(); cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';
+  cx.drawImage(proxyCanvas, 0, 0, cv.width, cv.height); cx.restore();
+  drawRoi(); drawTrack(i);
+  setPreviewNote(true);
+}
+function setPreviewNote(on) {
+  const r = $('frameReadout');
+  r.textContent = r.textContent.replace(/ · loading full frame…$/, '') + (on ? ' · loading full frame…' : '');
 }
 function paintFrame() {
   if (!S.frameImg) return;
@@ -510,19 +566,19 @@ function paintFrame() {
     peaking(out); cx.putImageData(out, 0, 0);
   } else cx.putImageData(img, 0, 0);
   drawRoi();
-  drawTrack();
+  drawTrack(S.frameIdx);
 }
 // Subject track for the block containing this frame: path of tracked positions plus the current one.
-function drawTrack() {
+function drawTrack(fi) {
   const sc = S.scores;
-  if (!sc || sc.example || !sc.cx || !S.blockOf || S.frameIdx == null || S.frameIdx >= sc.cx.length) return;
-  const k = S.blockOf[S.frameIdx]; if (k < 0) return;
+  if (!sc || sc.example || !sc.cx || !S.blockOf || fi == null || fi >= sc.cx.length) return;
+  const k = S.blockOf[fi]; if (k < 0) return;
   const g = S.segments[k], col = '#ffd34d', lw = Math.max(1.5, 2 / viewScale);
   cx.save(); cx.strokeStyle = col; cx.lineWidth = lw; cx.globalAlpha = .85; cx.beginPath();
   let started = false;
   for (let i = g.a; i <= g.b; i++) { const x = sc.cx[i], y = sc.cy[i]; if (!Number.isFinite(x)) continue; if (!started) { cx.moveTo(x, y); started = true; } else cx.lineTo(x, y); }
   cx.stroke(); cx.globalAlpha = 1;
-  const x = sc.cx[S.frameIdx], y = sc.cy[S.frameIdx];
+  const x = sc.cx[fi], y = sc.cy[fi];
   if (Number.isFinite(x)) {
     const r = Math.max(6, 9 / viewScale);
     cx.lineWidth = lw; cx.beginPath(); cx.arc(x, y, r, 0, Math.PI * 2); cx.stroke();
@@ -618,6 +674,7 @@ async function runAnalysis() {
     S.scores = { lap: r.lap, sob: r.sob, cx: r.cx, cy: r.cy, frames: r.frames, fps: S.info.fps, example: false };
     S.picked = null;
     S.bg = r.bg; S.bgW = S.info.width; S.analyzedRoi = roi;
+    S.proxy = r.proxy && r.proxy.n ? r.proxy : null;
     $('exampleNote').hidden = true;
     renderSpecs({ frames: r.frames });
     $('scrub').max = r.frames - 1;
@@ -661,24 +718,13 @@ function onProgress(m) {
     $('exStatus').textContent = m.phase === 'zip' ? `Packing ${fmtNum(m.done)} of ${fmtNum(m.total)} frames…` : `Extracting frame ${fmtNum(m.done)} of ${fmtNum(m.total)}…`;
   }
 }
-// ffmpeg.wasm's H.264 encoder leaks memory on every run, so restart the decoder
-// after a few encodes (sooner for large frames). Results live on this page, so nothing is lost.
-async function afterEncode() {
-  S.encodes = (S.encodes || 0) + 1;
-  const limit = Math.max(1, Math.floor(3e6 / (S.info.width * S.info.height)));
-  if (S.encodes < limit) return;
-  S.encodes = 0;
-  S.worker.terminate(); S.worker = null; S.ready = false; S.startP = null; frameReq.busy = false;
-  await ensureWorker();
-  await call({ type: 'open', file: S.file }, 'info');
-}
 async function cancelWork() {
   if (!S.worker) return;
   S.worker.terminate(); S.worker = null; S.ready = false; S.startP = null;
   if (pending) { const p = pending; pending = null; p.reject(new Error('cancelled')); }
   $('anProg').hidden = true; $('exProg').hidden = true;
   frameReq.busy = false;
-  try { await ensureWorker(); await call({ type: 'open', file: S.file }, 'info'); pumpFrame(); }
+  try { await ensureWorker(); await call({ type: 'open', file: S.file }, 'info'); }
   catch (e) { $('openErr').hidden = false; $('openErr').textContent = e.message; }
 }
 
@@ -1083,7 +1129,6 @@ $('build').addEventListener('click', async () => {
     S.exportBlob = r.blob; S.exportName = r.name;
     $('exProg').hidden = true; $('exDone').hidden = false;
     $('exInfo').textContent = `${r.name} · ${fmtNum(r.count)} ${format === 'clips' ? 'clips' : 'frames'} · ${fmtBytes(r.size)}`;
-    if (format === 'clips' || format === 'mp4') await afterEncode();
   } catch (e) {
     $('exProg').hidden = true;
     if (e.message !== 'cancelled') { $('exErr').hidden = false; $('exErr').textContent = e.message; }
@@ -1113,7 +1158,6 @@ async function saveBlockClip(k, btn) {
   try {
     const name = baseName() + '_' + clipName(k);
     const r = await call({ type: 'export', format: 'clip', blocks: [{ a: g.a, b: g.b, name }], speed: +$('clipSpeed').value, burn: $('burn').checked, baseName: baseName() }, 'exported');
-    await afterEncode();
     btn.textContent = 'Save clip';
     await saveFile(r.name, r.blob);
   } catch (e) {

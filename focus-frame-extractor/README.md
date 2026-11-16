@@ -25,6 +25,12 @@ starts), a single block's clip from its table row, image ZIPs, or one combined M
 be slowed to 1/2, 1/4 or 1/10 speed. Video exports can burn the original frame number and
 timestamp into the top-left corner of every frame (on by default).
 
+Frame viewer: a second decoder serves the viewer, so scrubbing works while an analysis or
+export runs. After analysis, a ~300 px grayscale copy of every frame (about 96 MB) gives an
+instant preview while dragging; the full frame replaces it within a few tens of milliseconds.
+ffmpeg.wasm leaks memory on every run, so each worker replaces its ffmpeg instance every 20
+runs from the already-compiled module.
+
 Method: grayscale → subtract a median background built from keyframes → Laplacian
 (or Sobel) response → score = mean of the strongest 0.05% of responses. Auto threshold
 is Otsu's method on log scores. Frames scoring at or above the threshold are exported.
