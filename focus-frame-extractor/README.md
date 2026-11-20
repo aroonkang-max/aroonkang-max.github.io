@@ -35,6 +35,9 @@ Exclusions (applied before blocks are formed; a block never spans an excluded fr
 - No subject: fewer than N pixels near the tracked position differ from their local median by
   more than 25 gray levels (default N = 0.04% of the frame). Removes empty frames and edge slivers;
   the local median makes it robust to slow lighting drift.
+- No ant in a block: a block whose velocity cannot be calculated (fewer than 3 frames with a
+  tracked subject at least the minimum subject size, or a failed fit) is dropped from the table,
+  clips and CSVs, and shaded gray on the chart.
 - One gray: more than 40% of the whole frame within +/-4 gray levels of a single value (blank,
   washed-out or fully blurred frames).
 
