@@ -38,6 +38,10 @@ Exclusions (applied before blocks are formed; a block never spans an excluded fr
 - No ant in a block: a block whose velocity cannot be calculated (fewer than 3 frames with a
   tracked subject at least the minimum subject size, or a failed fit) is dropped from the table,
   clips and CSVs, and shaded gray on the chart.
+- Dark / rig: more than 25% of the whole frame at or below gray level 63 (of 255; both
+  adjustable). Catches rig parts or anything else blocking the lens, whose hard edges otherwise
+  score far above a real subject. Dark and one-gray frames are also left out of the automatic
+  threshold and the chart scale.
 - One gray: more than 40% of the whole frame within +/-4 gray levels of a single value (blank,
   washed-out or fully blurred frames).
 
