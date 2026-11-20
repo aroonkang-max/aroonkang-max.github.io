@@ -279,6 +279,33 @@ function makeScorer(W, H, roi, bg, kFrac) {
     }
     return [cx, cy];
   };
+  // Subject size: pixels near the tracked position that differ from their local surroundings
+  // by more than 25 gray levels. The local median absorbs lighting drift, so an empty frame
+  // scores about 0 and a sliver of the subject at the frame edge only a few dozen.
+  const histD = new Uint32Array(511);
+  const subjectArea = (cx, cy) => {
+    if (!Number.isFinite(cx)) return 0;
+    const wx0 = Math.max(x0, Math.round(cx - R)), wx1 = Math.min(x1, Math.round(cx + R));
+    const wy0 = Math.max(y0, Math.round(cy - R)), wy1 = Math.min(y1, Math.round(cy + R));
+    histD.fill(0); let cnt = 0;
+    for (let y = wy0; y < wy1; y++) for (let i = y * W + wx0, e = y * W + wx1; i < e; i++) { histD[D[i] + 255]++; cnt++; }
+    if (!cnt) return 0;
+    let acc = 0, med = 0;
+    for (let v = 0; v < 511; v++) { acc += histD[v]; if (acc * 2 >= cnt) { med = v - 255; break; } }
+    let area = 0;
+    for (let v = 0; v < 511; v++) { const dv = v - 255 - med; if (dv > 25 || dv < -25) area += histD[v]; }
+    return area;
+  };
+  // Largest share of the whole frame whose raw gray level lies within +/-4 of a single value
+  // (a 9-level band). Blank, washed-out or fully blurred frames score high.
+  const histG = new Uint32Array(256);
+  const grayShare = (g) => {
+    histG.fill(0);
+    for (let i = 0, n = W * H; i < n; i++) histG[g[i]]++;
+    let win = 0, best = 0;
+    for (let v = 0; v < 256; v++) { win += histG[v]; if (v >= 9) win -= histG[v - 9]; if (win > best) best = win; }
+    return best / (W * H);
+  };
   return (g) => {
     const ya = y0 - 1, yb = y1 + 1, xa = x0 - 1, xb = x1 + 1;
     for (let y = ya; y < yb; y++) {
@@ -313,7 +340,7 @@ function makeScorer(W, H, roi, bg, kFrac) {
       }
     }
     const [cx, cy] = locate(np);
-    return [topMean(histL), topMean(histS) / 4, cx, cy];
+    return [topMean(histL), topMean(histS) / 4, cx, cy, subjectArea(cx, cy), grayShare(g)];
   };
 }
 
@@ -362,15 +389,16 @@ function analyze({ roi, bgSub, kFrac }) {
   const prox = makeProxy(W, H, Math.max(16, Math.ceil(info.frames * 1.05) + 16));
   let cap = Math.max(16, Math.ceil(info.frames * 1.05) + 16);
   let lap = new Float32Array(cap), sob = new Float32Array(cap), cx = new Float32Array(cap), cy = new Float32Array(cap);
+  let area = new Float32Array(cap), gray = new Float32Array(cap);
   const grow = (arr) => { const a = new Float32Array(cap); a.set(arr); return a; };
   let lastPost = 0;
   const t1 = performance.now();
   const n = streamFrames([], null, 'gray', N, (g, i) => {
     if (i >= cap) {
       cap *= 2;
-      lap = grow(lap); sob = grow(sob); cx = grow(cx); cy = grow(cy);
+      lap = grow(lap); sob = grow(sob); cx = grow(cx); cy = grow(cy); area = grow(area); gray = grow(gray);
     }
-    const s = scorer(g); lap[i] = s[0]; sob[i] = s[1]; cx[i] = s[2]; cy[i] = s[3];
+    const s = scorer(g); lap[i] = s[0]; sob[i] = s[1]; cx[i] = s[2]; cy[i] = s[3]; area[i] = s[4]; gray[i] = s[5];
     prox.add(g, i);
     const now = performance.now();
     if (now - lastPost > 120) {
@@ -380,10 +408,11 @@ function analyze({ roi, bgSub, kFrac }) {
   });
   if (n === 0) throw new Error('No frames could be decoded.\n' + lastLog());
   const lapOut = lap.slice(0, n), sobOut = sob.slice(0, n), cxOut = cx.slice(0, n), cyOut = cy.slice(0, n);
+  const areaOut = area.slice(0, n), grayOut = gray.slice(0, n);
   const proxy = { data: prox.data, w: prox.pw, h: prox.ph, n: Math.min(n, prox.cap) };
-  const msg = { type: 'scores', lap: lapOut, sob: sobOut, cx: cxOut, cy: cyOut, frames: n, seconds: (performance.now() - t0) / 1000,
+  const msg = { type: 'scores', lap: lapOut, sob: sobOut, cx: cxOut, cy: cyOut, area: areaOut, gray: grayOut, frames: n, seconds: (performance.now() - t0) / 1000,
     bgCount, bg: bg ? bg.slice() : null, proxy };
-  post(msg, [lapOut.buffer, sobOut.buffer, cxOut.buffer, cyOut.buffer, prox.data.buffer].concat(msg.bg ? [msg.bg.buffer] : []));
+  post(msg, [lapOut.buffer, sobOut.buffer, cxOut.buffer, cyOut.buffer, areaOut.buffer, grayOut.buffer, prox.data.buffer].concat(msg.bg ? [msg.bg.buffer] : []));
 }
 
 /* ---------- export ---------- */

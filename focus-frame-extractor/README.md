@@ -31,6 +31,13 @@ instant preview while dragging; the full frame replaces it within a few tens of 
 ffmpeg.wasm leaks memory on every run, so each worker replaces its ffmpeg instance every 20
 runs from the already-compiled module.
 
+Exclusions (applied before blocks are formed; a block never spans an excluded frame):
+- No subject: fewer than N pixels near the tracked position differ from their local median by
+  more than 25 gray levels (default N = 0.04% of the frame). Removes empty frames and edge slivers;
+  the local median makes it robust to slow lighting drift.
+- One gray: more than 40% of the whole frame within +/-4 gray levels of a single value (blank,
+  washed-out or fully blurred frames).
+
 Method: grayscale → subtract a median background built from keyframes → Laplacian
 (or Sobel) response → score = mean of the strongest 0.05% of responses. Auto threshold
 is Otsu's method on log scores. Frames scoring at or above the threshold are exported.

@@ -227,7 +227,7 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
   <!-- 4. Timeline -->
   <section class="panel" aria-labelledby="h-tl">
     <div class="panel-head"><h2 id="h-tl"><b>4</b>Focus timeline</h2>
-      <div class="legend"><span><i style="background: var(--accent); opacity: .35"></i>score per frame</span><span><i style="background: var(--accent)"></i>smoothed score</span><span><i style="background: var(--peak)"></i>threshold</span><span><i style="background: var(--ink); height: 4px"></i>block average</span><span><i style="background: var(--peak-soft); height: 10px"></i>in-focus block</span></div>
+      <div class="legend"><span><i style="background: var(--accent); opacity: .35"></i>score per frame</span><span><i style="background: var(--accent)"></i>smoothed score</span><span><i style="background: var(--peak)"></i>threshold</span><span><i style="background: var(--ink); height: 4px"></i>block average</span><span><i style="background: var(--peak-soft); height: 10px"></i>in-focus block</span><span><i style="background: var(--muted); height: 4px"></i>excluded frames</span></div>
     </div>
     <div class="example-note" id="exampleNote"><b>Example data.</b> Scores from <span class="mono">Side2025-07-28T16_20_57.avi</span> (9,393 frames at 30 fps). Load a video and run the analysis to replace it with your own.</div>
     <div class="chart-box" id="chartBox"><canvas id="chart" tabindex="0" aria-label="Sharpness score for every frame. Click a point to identify its frame; drag the red line to change the threshold."></canvas><div class="chart-tip" id="chartTip" hidden></div></div>
@@ -269,12 +269,23 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
         </select>
       </label>
     </div>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="exSubject" checked> Exclude frames with no subject: smaller than</label>
+      <label class="field">Min. subject size (px)
+        <input type="number" id="minArea" min="0" step="1" value="153">
+      </label>
+      <label class="check"><input type="checkbox" id="exGray" checked> Exclude frames where more than</label>
+      <label class="field">% of frame is one gray (±4 levels)
+        <input type="number" id="grayMax" min="1" max="100" step="1" value="40">
+      </label>
+    </div>
     <div class="summary">
       <div><span>Frames kept</span><b class="hl" id="sKept">—</b></div>
       <div><span>Share of video</span><b id="sShare">—</b></div>
       <div><span>In-focus blocks</span><b id="sRuns">—</b></div>
       <div><span>Kept footage</span><b id="sDur">—</b></div>
       <div><span>Mean speed <small id="sSpeedUnit" class="mono"></small></span><b id="sSpeed">—</b></div>
+      <div><span>Frames excluded</span><b id="sExcl" title="">—</b></div>
     </div>
     <p class="subhead">In-focus blocks · average velocity and acceleration of the subject</p>
     <div class="segments"><table>
@@ -284,7 +295,7 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
     <details>
       <summary>How blocks, velocity and acceleration are calculated</summary>
       <p>The per-frame score is averaged over a sliding window (the Smoothing setting) so a single noisy frame can't split a pass in two. Frames whose smoothed score reaches the threshold are grouped into blocks; gaps up to “Merge gaps” frames long are absorbed into the surrounding block, and blocks shorter than “Min. block” are dropped. Each block's flat black bar on the chart is its average score.</p>
-      <p>The subject's position in every frame is the centroid of its strongest edges (the same pixels that set the sharpness score), locked onto the densest cluster so stray edges elsewhere are ignored. Within each block, a straight line fitted to position over time gives the average velocity, and a parabola fitted to the same points gives the average acceleration (twice its curvature). Points more than three robust standard deviations off the fit are discarded before the final fit. Positions are measured in pixels, so x is positive to the right and y is positive downward. Enter the size of one pixel to get real units. Tracking needs “Ignore the static scene” switched on.</p>
+      <p>The subject's position in every frame is the centroid of its strongest edges (the same pixels that set the sharpness score), locked onto the densest cluster so stray edges elsewhere are ignored. Within each block, a straight line fitted to position over time gives the average velocity, and a parabola fitted to the same points gives the average acceleration (twice its curvature). Points more than three robust standard deviations off the fit are discarded before the final fit. Frames are excluded before blocks are formed, and a block never spans an excluded frame. “No subject” means fewer than the minimum number of pixels near the tracked position differ from their local surroundings by more than 25 gray levels; this removes empty frames and slivers of the subject at the frame edge, and is not fooled by slow lighting changes. The default is 0.04% of the frame. “One gray” means more than the set share of the whole frame lies within ±4 gray levels of a single value, as in blank, washed-out or completely blurred frames. Positions are measured in pixels, so x is positive to the right and y is positive downward. Enter the size of one pixel to get real units. Tracking needs “Ignore the static scene” switched on.</p>
     </details>
   </section>
 
@@ -333,6 +344,7 @@ const S = {
   worker: null, ready: false, file: null, info: null,
   scores: null,       // {lap, sob, frames, fps, example}
   metric: 'lap', threshold: 20, minRun: 3, smooth: 5, mergeGap: 5, pxSize: 1, pxUnit: 'px',
+  exSubject: true, minArea: 153, minAreaAuto: true, exGray: true, grayMax: 40, excluded: null, exCounts: null,
   sm: null, blockOf: null, picked: null,
   roi: null, analyzedRoi: undefined, bg: null, bgW: 0,
   idx: 0, kept: null, segments: [],
@@ -343,11 +355,15 @@ const S = {
 function decodeExample() {
   const bin = atob(EXAMPLE); const u8 = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-  const u16 = new Uint16Array(u8.buffer); const n = u16.length / 4;
+  const u16 = new Uint16Array(u8.buffer); const n = u16.length / 6;
   const lap = new Float32Array(n), sob = new Float32Array(n), cx = new Float32Array(n), cy = new Float32Array(n);
+  const area = new Float32Array(n), gray = new Float32Array(n);
   const pos = (v) => (v === 65535 ? NaN : v / 10);
-  for (let i = 0; i < n; i++) { lap[i] = u16[i] / 10; sob[i] = u16[n + i] / 10; cx[i] = pos(u16[2 * n + i]); cy[i] = pos(u16[3 * n + i]); }
-  return { lap, sob, cx, cy, frames: n, fps: 30, example: true };
+  for (let i = 0; i < n; i++) {
+    lap[i] = u16[i] / 10; sob[i] = u16[n + i] / 10; cx[i] = pos(u16[2 * n + i]); cy[i] = pos(u16[3 * n + i]);
+    area[i] = u16[4 * n + i]; gray[i] = u16[5 * n + i] / 10000;
+  }
+  return { lap, sob, cx, cy, area, gray, frames: n, fps: 30, width: 1912, height: 200, example: true };
 }
 
 /* ---------- worker plumbing ---------- */
@@ -671,7 +687,9 @@ async function runAnalysis() {
   const roi = S.roi ? { ...S.roi } : null;
   try {
     const r = await call({ type: 'analyze', roi, bgSub: $('bgsub').checked, kFrac: +$('kfrac').value }, 'scores');
-    S.scores = { lap: r.lap, sob: r.sob, cx: r.cx, cy: r.cy, frames: r.frames, fps: S.info.fps, example: false };
+    S.scores = { lap: r.lap, sob: r.sob, cx: r.cx, cy: r.cy, area: r.area, gray: r.gray, frames: r.frames, fps: S.info.fps,
+      width: S.info.width, height: S.info.height, example: false };
+    if (S.minAreaAuto) setDefaultMinArea();
     S.picked = null;
     S.bg = r.bg; S.bgW = S.info.width; S.analyzedRoi = roi;
     S.proxy = r.proxy && r.proxy.n ? r.proxy : null;
@@ -777,6 +795,29 @@ $('minRun').addEventListener('change', () => { S.minRun = Math.max(1, Math.round
 $('pxSize').addEventListener('change', () => { const v = +$('pxSize').value; S.pxSize = v > 0 ? v : 1; $('pxSize').value = S.pxSize; renderBlocks(); });
 $('pxUnit').addEventListener('change', () => { S.pxUnit = $('pxUnit').value; if (S.pxUnit === 'px') { S.pxSize = 1; $('pxSize').value = 1; } renderBlocks(); });
 $('metric').addEventListener('change', () => { S.metric = $('metric').value; autoThreshold(); });
+$('exSubject').addEventListener('change', () => { S.exSubject = $('exSubject').checked; recompute(); });
+$('exGray').addEventListener('change', () => { S.exGray = $('exGray').checked; recompute(); });
+$('minArea').addEventListener('change', () => { S.minArea = Math.max(0, Math.round(+$('minArea').value || 0)); $('minArea').value = S.minArea; S.minAreaAuto = false; recompute(); });
+$('grayMax').addEventListener('change', () => { S.grayMax = Math.min(100, Math.max(1, +$('grayMax').value || 40)); $('grayMax').value = S.grayMax; recompute(); });
+function setDefaultMinArea() {
+  S.minArea = Math.max(10, Math.round(0.0004 * S.scores.width * S.scores.height));
+  $('minArea').value = S.minArea;
+}
+/* Per frame: 0 = usable, 1 = no subject, 2 = mostly one gray level (3 = both). */
+function exclusionFlags() {
+  const n = series().length, ex = new Uint8Array(n);
+  const { area, gray } = S.scores;
+  const counts = { subject: 0, gray: 0, any: 0 };
+  for (let i = 0; i < n; i++) {
+    let f = 0;
+    if (S.exSubject && area && area[i] < S.minArea) { f |= 1; counts.subject++; }
+    if (S.exGray && gray && gray[i] * 100 > S.grayMax) { f |= 2; counts.gray++; }
+    if (f) counts.any++;
+    ex[i] = f;
+  }
+  return { ex, counts };
+}
+const exclusionText = (f) => [f & 1 ? 'no subject in frame' : '', f & 2 ? `over ${S.grayMax}% one gray` : ''].filter(Boolean).join(' + ');
 
 /* Least-squares polynomial fit (degree 1 or 2) of y(t); returns coefficients [c0, c1, (c2)]. */
 function polyfit(t, y, deg) {
@@ -826,10 +867,12 @@ function recompute() {
   const raw = series(), n = raw.length, th = S.threshold;
   const sm = movingAverage(raw, S.smooth);
   S.sm = sm;
-  // 1. runs where the smoothed score reaches the threshold
+  const { ex, counts } = exclusionFlags();
+  S.excluded = ex; S.exCounts = counts;
+  // 1. runs where the smoothed score reaches the threshold, skipping excluded frames
   let runs = []; let s = -1;
   for (let i = 0; i <= n; i++) {
-    const on = i < n && sm[i] >= th;
+    const on = i < n && sm[i] >= th && !ex[i];
     if (on && s < 0) s = i;
     if (!on && s >= 0) { runs.push([s, i - 1]); s = -1; }
   }
@@ -837,7 +880,9 @@ function recompute() {
   const merged = [];
   for (const r of runs) {
     const last = merged[merged.length - 1];
-    if (last && r[0] - last[1] - 1 <= S.mergeGap) last[1] = r[1]; else merged.push([r[0], r[1]]);
+    let gapExcluded = false;
+    if (last) for (let k = last[1] + 1; k < r[0]; k++) if (ex[k]) { gapExcluded = true; break; }
+    if (last && !gapExcluded && r[0] - last[1] - 1 <= S.mergeGap) last[1] = r[1]; else merged.push([r[0], r[1]]);
   }
   const keep = new Uint8Array(n), blockOf = new Int32Array(n).fill(-1);
   const blocks = [];
@@ -852,6 +897,8 @@ function recompute() {
   const fps = S.scores.fps;
   $('sKept').textContent = fmtNum(count);
   $('sShare').textContent = (count / n * 100).toFixed(1) + '%';
+  $('sExcl').textContent = fmtNum(counts.any);
+  $('sExcl').title = `No subject: ${fmtNum(counts.subject)} · mostly one gray: ${fmtNum(counts.gray)}`;
   $('sRuns').textContent = fmtNum(blocks.length);
   $('sDur').textContent = (count / fps).toFixed(1) + ' s';
   renderBlocks();
@@ -909,7 +956,8 @@ function highlightBlockRow(scroll) {
 function frameFacts(i) {
   const raw = series(), fps = S.scores.fps;
   const k = S.blockOf ? S.blockOf[i] : -1;
-  return { i, t: i / fps, score: raw[i], sm: S.sm ? S.sm[i] : raw[i], k, block: k >= 0 ? S.segments[k] : null };
+  return { i, t: i / fps, score: raw[i], sm: S.sm ? S.sm[i] : raw[i], k, block: k >= 0 ? S.segments[k] : null,
+    ex: S.excluded ? S.excluded[i] : 0, area: S.scores.area ? S.scores.area[i] : NaN, gray: S.scores.gray ? S.scores.gray[i] : NaN };
 }
 function updatePicked() {
   const el = $('picked');
@@ -928,7 +976,9 @@ function updatePicked() {
     add('Block avg', f.block.mean.toFixed(1));
     if (m) add('Velocity', `${fmtMotion(m.vx)}, ${fmtMotion(m.vy)} ${unitV()}`);
     if (m) add('Accel.', `${fmtMotion(m.ax)}, ${fmtMotion(m.ay)} ${unitA()}`);
-  } else add('Status', 'not in an in-focus block');
+  } else add('Status', f.ex ? `excluded: ${exclusionText(f.ex)}` : 'not in an in-focus block');
+  if (Number.isFinite(f.area)) add('Subject', `${fmtNum(f.area)} px`);
+  if (Number.isFinite(f.gray)) add('One gray', `${(f.gray * 100).toFixed(0)}%`);
   if (S.scores.example) add('', 'example data · load a video to see the frame');
 }
 function updateBadge() {
@@ -936,7 +986,8 @@ function updateBadge() {
   if (!S.scores || S.scores.example || !S.kept || S.idx >= S.kept.length) { b.className = 'badge'; b.textContent = 'not scored'; return; }
   const v = series()[S.idx], k = S.blockOf[S.idx];
   b.className = 'badge' + (k >= 0 ? ' in' : '');
-  b.textContent = `score ${v.toFixed(1)} · ${k >= 0 ? `in focus · block ${k + 1}` : 'out of focus'}`;
+  const e = S.excluded ? S.excluded[S.idx] : 0;
+  b.textContent = `score ${v.toFixed(1)} · ${k >= 0 ? `in focus · block ${k + 1}` : e ? `excluded: ${exclusionText(e)}` : 'out of focus'}`;
 }
 
 /* ---------- chart ---------- */
@@ -989,6 +1040,16 @@ function drawChart() {
   // in-focus blocks
   cc.fillStyle = tok('--peak-soft');
   for (const g of S.segments) { const xa = X(g.a), xb = Math.max(X(g.b), xa + 1); cc.fillRect(xa, PAD.t, xb - xa, ph); }
+  // excluded frames: a strip along the bottom of the plot
+  if (S.excluded) {
+    cc.fillStyle = withAlpha(tok('--muted'), .55);
+    const ex = S.excluded; let st = -1;
+    for (let i = 0; i <= n; i++) {
+      const on = i < n && ex[i];
+      if (on && st < 0) st = i;
+      if (!on && st >= 0) { const xa = X(st), xb = Math.max(X(i - 1), xa + 1); cc.fillRect(xa, PAD.t + ph - 4, xb - xa, 4); st = -1; }
+    }
+  }
   // raw scores (faint) and smoothed scores
   cc.lineWidth = 1;
   if (S.smooth > 1) {
@@ -1077,7 +1138,7 @@ function showTip(e, i) {
   const line = (txt, cls) => { const d = document.createElement('div'); if (cls) { const b = document.createElement('b'); b.textContent = txt; d.appendChild(b); } else d.textContent = txt; tip.appendChild(d); };
   line(`Frame ${fmtNum(i)} · ${f.t.toFixed(3)} s`);
   line(`score ${f.score.toFixed(1)}` + (S.smooth > 1 ? ` · smoothed ${f.sm.toFixed(1)}` : ''));
-  if (f.block) line(`block ${f.k + 1} · avg ${f.block.mean.toFixed(1)}`, true); else line('out of focus');
+  if (f.block) line(`block ${f.k + 1} · avg ${f.block.mean.toFixed(1)}`, true); else line(f.ex ? `excluded: ${exclusionText(f.ex)}` : 'out of focus');
   tip.hidden = false;
   const box = $('chartBox').getBoundingClientRect(), r = ch.getBoundingClientRect();
   const x = e.clientX - box.left, w = tip.offsetWidth;
@@ -1088,15 +1149,17 @@ function showTip(e, i) {
 /* ---------- export ---------- */
 function baseName() { return (S.info.name.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_') || 'video'); }
 function settingsLine() {
-  return `# source=${S.info.name}; fps=${S.scores.fps}; method=${S.metric === 'lap' ? 'laplacian' : 'sobel'}; threshold=${S.threshold}; smoothing=${S.smooth}; merge_gap=${S.mergeGap}; min_block=${S.minRun}; pixel_size=${S.pxSize} ${S.pxUnit}; region=${S.analyzedRoi ? `${S.analyzedRoi.x},${S.analyzedRoi.y},${S.analyzedRoi.w},${S.analyzedRoi.h}` : 'full'}`;
+  return `# source=${S.info.name}; fps=${S.scores.fps}; method=${S.metric === 'lap' ? 'laplacian' : 'sobel'}; threshold=${S.threshold}; smoothing=${S.smooth}; merge_gap=${S.mergeGap}; min_block=${S.minRun}; pixel_size=${S.pxSize} ${S.pxUnit}; exclude_no_subject=${S.exSubject ? `<${S.minArea}px` : 'off'}; exclude_one_gray=${S.exGray ? `>${S.grayMax}%` : 'off'}; region=${S.analyzedRoi ? `${S.analyzedRoi.x},${S.analyzedRoi.y},${S.analyzedRoi.w},${S.analyzedRoi.h}` : 'full'}`;
 }
 function scoresCsv() {
   const fps = S.scores.fps, { lap, sob, cx, cy } = S.scores;
-  const lines = [settingsLine(), 'frame,time_s,laplacian_score,sobel_score,smoothed_score,subject_x_px,subject_y_px,block,in_focus'];
+  const lines = [settingsLine(), 'frame,time_s,laplacian_score,sobel_score,smoothed_score,subject_x_px,subject_y_px,subject_area_px,one_gray_share,excluded,block,in_focus'];
+  const { area, gray } = S.scores;
   const f = (v) => Number.isFinite(v) ? v.toFixed(2) : '';
   for (let i = 0; i < lap.length; i++) {
     const k = S.blockOf[i];
-    lines.push(`${i},${(i / fps).toFixed(4)},${lap[i].toFixed(3)},${sob[i].toFixed(3)},${S.sm[i].toFixed(3)},${f(cx[i])},${f(cy[i])},${k >= 0 ? k + 1 : ''},${k >= 0 ? 1 : 0}`);
+    const e = S.excluded[i];
+    lines.push(`${i},${(i / fps).toFixed(4)},${lap[i].toFixed(3)},${sob[i].toFixed(3)},${S.sm[i].toFixed(3)},${f(cx[i])},${f(cy[i])},${area ? Math.round(area[i]) : ''},${gray ? gray[i].toFixed(4) : ''},${e ? exclusionText(e).replace(/ \+ /g, '; ') : ''},${k >= 0 ? k + 1 : ''},${k >= 0 ? 1 : 0}`);
   }
   return lines.join('\n') + '\n';
 }
