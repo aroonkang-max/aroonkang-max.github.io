@@ -20,6 +20,7 @@ let runs = 0;             // ffmpeg runs on the current instance
 // roughly 150 frame decodes or 40 encodes. Throwing the instance away and creating a
 // new one from the already-compiled module clears it and takes only a moment.
 const RUNS_PER_INSTANCE = 20;
+const DARK_STEPS = 128;   // dark share is recorded for every gray level 0..127
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 
@@ -299,15 +300,15 @@ function makeScorer(W, H, roi, bg, kFrac) {
   // Largest share of the whole frame whose raw gray level lies within +/-4 of a single value
   // (a 9-level band). Blank, washed-out or fully blurred frames score high.
   const histG = new Uint32Array(256);
-  // Share of the whole frame at or below each of these gray levels (dark / black areas such
-  // as rig parts in front of the lens). Filled by grayShare(), which builds the histogram.
-  const DARK_LEVELS = [15, 31, 47, 63, 79, 95, 111, 127];
-  const darkShare = new Float32Array(DARK_LEVELS.length);
+  // Dark share: for every gray level v = 0..127, the fraction of the whole frame with
+  // gray <= v (dark gray or darker areas such as rig parts in front of the lens).
+  // Filled by grayShare(), which builds the histogram.
+  const darkShare = new Float32Array(DARK_STEPS);
   const grayShare = (g) => {
     histG.fill(0);
     for (let i = 0, n = W * H; i < n; i++) histG[g[i]]++;
-    let cum = 0, li = 0;
-    for (let v = 0; v <= 127 && li < DARK_LEVELS.length; v++) { cum += histG[v]; if (v === DARK_LEVELS[li]) darkShare[li++] = cum / (W * H); }
+    let cum = 0;
+    for (let v = 0; v < DARK_STEPS; v++) { cum += histG[v]; darkShare[v] = cum / (W * H); }
     let win = 0, best = 0;
     for (let v = 0; v < 256; v++) { win += histG[v]; if (v >= 9) win -= histG[v - 9]; if (win > best) best = win; }
     return best / (W * H);
@@ -395,7 +396,7 @@ function analyze({ roi, bgSub, kFrac }) {
   const prox = makeProxy(W, H, Math.max(16, Math.ceil(info.frames * 1.05) + 16));
   let cap = Math.max(16, Math.ceil(info.frames * 1.05) + 16);
   let lap = new Float32Array(cap), sob = new Float32Array(cap), cx = new Float32Array(cap), cy = new Float32Array(cap);
-  let area = new Float32Array(cap), gray = new Float32Array(cap), dark = new Uint16Array(cap * 8);
+  let area = new Float32Array(cap), gray = new Float32Array(cap), dark = new Uint16Array(cap * DARK_STEPS);
   const grow = (arr) => { const a = new Float32Array(cap); a.set(arr); return a; };
   let lastPost = 0;
   const t1 = performance.now();
@@ -403,10 +404,10 @@ function analyze({ roi, bgSub, kFrac }) {
     if (i >= cap) {
       cap *= 2;
       lap = grow(lap); sob = grow(sob); cx = grow(cx); cy = grow(cy); area = grow(area); gray = grow(gray);
-      const d2 = new Uint16Array(cap * 8); d2.set(dark); dark = d2;
+      const d2 = new Uint16Array(cap * DARK_STEPS); d2.set(dark); dark = d2;
     }
     const s = scorer(g); lap[i] = s[0]; sob[i] = s[1]; cx[i] = s[2]; cy[i] = s[3]; area[i] = s[4]; gray[i] = s[5];
-    for (let k = 0; k < 8; k++) dark[i * 8 + k] = Math.round(s[6][k] * 65535);
+    for (let k = 0; k < DARK_STEPS; k++) dark[i * DARK_STEPS + k] = Math.round(s[6][k] * 65535);
     prox.add(g, i);
     const now = performance.now();
     if (now - lastPost > 120) {
@@ -416,7 +417,7 @@ function analyze({ roi, bgSub, kFrac }) {
   });
   if (n === 0) throw new Error('No frames could be decoded.\n' + lastLog());
   const lapOut = lap.slice(0, n), sobOut = sob.slice(0, n), cxOut = cx.slice(0, n), cyOut = cy.slice(0, n);
-  const areaOut = area.slice(0, n), grayOut = gray.slice(0, n), darkOut = dark.slice(0, n * 8);
+  const areaOut = area.slice(0, n), grayOut = gray.slice(0, n), darkOut = dark.slice(0, n * DARK_STEPS);
   const proxy = { data: prox.data, w: prox.pw, h: prox.ph, n: Math.min(n, prox.cap) };
   const msg = { type: 'scores', lap: lapOut, sob: sobOut, cx: cxOut, cy: cyOut, area: areaOut, gray: grayOut, dark: darkOut, frames: n, seconds: (performance.now() - t0) / 1000,
     bgCount, bg: bg ? bg.slice() : null, proxy };

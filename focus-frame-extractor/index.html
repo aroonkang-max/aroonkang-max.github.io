@@ -282,21 +282,12 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
     <div class="row">
       <label class="check"><input type="checkbox" id="exDark" checked> Exclude frames where more than</label>
       <label class="field">% of frame is dark
-        <input type="number" id="darkMax" min="1" max="100" step="1" value="25">
+        <input type="number" id="darkMax" min="1" max="100" step="1" value="20">
       </label>
-      <label class="field">Dark = gray level at or below
-        <select id="darkLevel">
-          <option value="15">15 (black)</option>
-          <option value="31">31</option>
-          <option value="47">47</option>
-          <option value="63" selected>63</option>
-          <option value="79">79</option>
-          <option value="95">95</option>
-          <option value="111">111</option>
-          <option value="127">127 (mid gray)</option>
-        </select>
+      <label class="field">Dark gray = gray value ≤ (0–127)
+        <input type="number" id="darkLevel" min="0" max="127" step="1" value="96">
       </label>
-      <p class="hint" style="margin:0 0 8px">For rig parts or other objects blocking the lens. Out of 255; normal frames of the example video are under 0.2% dark.</p>
+      <p class="hint mono" id="darkFormula" style="margin:0 0 8px">dark share = pixels with gray ≤ 96 ÷ all pixels; excluded if &gt; 20%</p>
     </div>
     <div class="summary">
       <div><span>Frames kept</span><b class="hl" id="sKept">—</b></div>
@@ -316,7 +307,7 @@ details p { font-size: 13px; color: var(--muted); max-width: 72ch; }
     <details>
       <summary>How blocks, velocity and acceleration are calculated</summary>
       <p>The per-frame score is averaged over a sliding window (the Smoothing setting) so a single noisy frame can't split a pass in two. Frames whose smoothed score reaches the threshold are grouped into blocks; gaps up to “Merge gaps” frames long are absorbed into the surrounding block, and blocks shorter than “Min. block” are dropped. Each block's flat black bar on the chart is its average score.</p>
-      <p>The subject's position in every frame is the centroid of its strongest edges (the same pixels that set the sharpness score), locked onto the densest cluster so stray edges elsewhere are ignored. Within each block, a straight line fitted to position over time gives the average velocity, and a parabola fitted to the same points gives the average acceleration (twice its curvature). Points more than three robust standard deviations off the fit are discarded before the final fit. Frames are excluded before blocks are formed, and a block never spans an excluded frame. “No subject” means fewer than the minimum number of pixels near the tracked position differ from their local surroundings by more than 25 gray levels; this removes empty frames and slivers of the subject at the frame edge, and is not fooled by slow lighting changes. The default is 0.04% of the frame. “Dark” excludes frames where more than the set share of the whole frame (25% by default) is at or below the chosen gray level (63 of 255 by default), which catches rig parts or anything else blocking the lens; their hard edges would otherwise score as sharp. A block whose velocity cannot be calculated, because fewer than 3 of its frames contain a detected ant (a tracked position with at least the minimum subject size), counts as having no ant: it is dropped from the table, the clips and the CSVs, and shown as gray shading on the chart. “One gray” means more than the set share of the whole frame lies within ±4 gray levels of a single value, as in blank, washed-out or completely blurred frames. Positions are measured in pixels, so x is positive to the right and y is positive downward. Enter the size of one pixel to get real units. Tracking needs “Ignore the static scene” switched on.</p>
+      <p>The subject's position in every frame is the centroid of its strongest edges (the same pixels that set the sharpness score), locked onto the densest cluster so stray edges elsewhere are ignored. Within each block, a straight line fitted to position over time gives the average velocity, and a parabola fitted to the same points gives the average acceleration (twice its curvature). Points more than three robust standard deviations off the fit are discarded before the final fit. Frames are excluded before blocks are formed, and a block never spans an excluded frame. “No subject” means fewer than the minimum number of pixels near the tracked position differ from their local surroundings by more than 25 gray levels; this removes empty frames and slivers of the subject at the frame edge, and is not fooled by slow lighting changes. The default is 0.04% of the frame. “Dark” uses dark share = (pixels with gray value ≤ 96) ÷ (all pixels in the frame) and excludes the frame if it is over 20% (both numbers adjustable). 96 of 255 is a dark gray (#606060), so dark gray and everything darker counts. This catches rig parts or anything else blocking the lens; their hard edges would otherwise score as sharp. A block whose velocity cannot be calculated, because fewer than 3 of its frames contain a detected ant (a tracked position with at least the minimum subject size), counts as having no ant: it is dropped from the table, the clips and the CSVs, and shown as gray shading on the chart. “One gray” means more than the set share of the whole frame lies within ±4 gray levels of a single value, as in blank, washed-out or completely blurred frames. Positions are measured in pixels, so x is positive to the right and y is positive downward. Enter the size of one pixel to get real units. Tracking needs “Ignore the static scene” switched on.</p>
     </details>
   </section>
 
@@ -366,7 +357,7 @@ const S = {
   scores: null,       // {lap, sob, frames, fps, example}
   metric: 'lap', threshold: 20, minRun: 3, smooth: 5, mergeGap: 5, pxSize: 1, pxUnit: 'px',
   exSubject: true, minArea: 153, minAreaAuto: true, exGray: true, grayMax: 40, excluded: null, exCounts: null,
-  exDark: true, darkMax: 25, darkLevel: 63,
+  exDark: true, darkMax: 20, darkLevel: 96,
   sm: null, blockOf: null, picked: null,
   roi: null, analyzedRoi: undefined, bg: null, bgW: 0,
   idx: 0, kept: null, segments: [],
@@ -832,13 +823,17 @@ $('exSubject').addEventListener('change', () => { S.exSubject = $('exSubject').c
 $('exGray').addEventListener('change', () => { S.exGray = $('exGray').checked; recompute(); });
 $('minArea').addEventListener('change', () => { S.minArea = Math.max(0, Math.round(+$('minArea').value || 0)); $('minArea').value = S.minArea; S.minAreaAuto = false; recompute(); });
 $('exDark').addEventListener('change', () => { S.exDark = $('exDark').checked; recompute(); });
-$('darkMax').addEventListener('change', () => { S.darkMax = Math.min(100, Math.max(1, +$('darkMax').value || 25)); $('darkMax').value = S.darkMax; recompute(); });
-$('darkLevel').addEventListener('change', () => { S.darkLevel = +$('darkLevel').value; recompute(); });
-const DARK_LEVELS = [15, 31, 47, 63, 79, 95, 111, 127];
-// Share (0-1) of frame i at or below the chosen dark gray level, or NaN if not measured.
+$('darkMax').addEventListener('change', () => { S.darkMax = Math.min(100, Math.max(1, +$('darkMax').value || 20)); $('darkMax').value = S.darkMax; recompute(); });
+$('darkLevel').addEventListener('change', () => {
+  S.darkLevel = Math.min(127, Math.max(0, Math.round(+$('darkLevel').value)));
+  if (!Number.isFinite(S.darkLevel)) S.darkLevel = 96;
+  $('darkLevel').value = S.darkLevel; recompute();
+});
+const DARK_STEPS = 128;   // the worker records the dark share for every gray level 0..127
+// Dark share of frame i: (pixels with gray <= darkLevel) / (all pixels), 0-1; NaN if not measured.
 function darkShareOf(i) {
   const d = S.scores && S.scores.dark; if (!d) return NaN;
-  return d[i * 8 + Math.max(0, DARK_LEVELS.indexOf(S.darkLevel))] / 65535;
+  return d[i * DARK_STEPS + S.darkLevel] / 65535;
 }
 $('grayMax').addEventListener('change', () => { S.grayMax = Math.min(100, Math.max(1, +$('grayMax').value || 40)); $('grayMax').value = S.grayMax; recompute(); });
 function setDefaultMinArea() {
@@ -850,12 +845,13 @@ function exclusionFlags() {
   const n = series().length, ex = new Uint8Array(n);
   const { area, gray } = S.scores;
   const counts = { subject: 0, gray: 0, dark: 0, any: 0 };
-  const dark = S.scores.dark, li = Math.max(0, DARK_LEVELS.indexOf(S.darkLevel)), darkLim = S.darkMax / 100 * 65535;
+  const dark = S.scores.dark, li = S.darkLevel, darkLim = S.darkMax / 100 * 65535;
+  $('darkFormula').textContent = `dark share = pixels with gray ≤ ${S.darkLevel} ÷ all pixels; excluded if > ${S.darkMax}%`;
   for (let i = 0; i < n; i++) {
     let f = 0;
     if (S.exSubject && area && area[i] < S.minArea) { f |= 1; counts.subject++; }
     if (S.exGray && gray && gray[i] * 100 > S.grayMax) { f |= 2; counts.gray++; }
-    if (S.exDark && dark && dark[i * 8 + li] > darkLim) { f |= 4; counts.dark++; }
+    if (S.exDark && dark && dark[i * DARK_STEPS + li] > darkLim) { f |= 4; counts.dark++; }
     if (f) counts.any++;
     ex[i] = f;
   }
@@ -1214,7 +1210,7 @@ function showTip(e, i) {
 /* ---------- export ---------- */
 function baseName() { return (S.info.name.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_') || 'video'); }
 function settingsLine() {
-  return `# source=${S.info.name}; fps=${S.scores.fps}; method=${S.metric === 'lap' ? 'laplacian' : 'sobel'}; threshold=${S.threshold}; smoothing=${S.smooth}; merge_gap=${S.mergeGap}; min_block=${S.minRun}; pixel_size=${S.pxSize} ${S.pxUnit}; exclude_no_subject=${S.exSubject ? `<${S.minArea}px` : 'off'}; exclude_one_gray=${S.exGray ? `>${S.grayMax}%` : 'off'}; exclude_dark=${S.exDark ? `>${S.darkMax}% at or below gray ${S.darkLevel}` : 'off'}; blocks_dropped_no_velocity=${(S.dropped || []).length}; region=${S.analyzedRoi ? `${S.analyzedRoi.x},${S.analyzedRoi.y},${S.analyzedRoi.w},${S.analyzedRoi.h}` : 'full'}`;
+  return `# source=${S.info.name}; fps=${S.scores.fps}; method=${S.metric === 'lap' ? 'laplacian' : 'sobel'}; threshold=${S.threshold}; smoothing=${S.smooth}; merge_gap=${S.mergeGap}; min_block=${S.minRun}; pixel_size=${S.pxSize} ${S.pxUnit}; exclude_no_subject=${S.exSubject ? `<${S.minArea}px` : 'off'}; exclude_one_gray=${S.exGray ? `>${S.grayMax}%` : 'off'}; exclude_dark=${S.exDark ? `dark_share(gray<=${S.darkLevel})>${S.darkMax}%` : 'off'}; blocks_dropped_no_velocity=${(S.dropped || []).length}; region=${S.analyzedRoi ? `${S.analyzedRoi.x},${S.analyzedRoi.y},${S.analyzedRoi.w},${S.analyzedRoi.h}` : 'full'}`;
 }
 function scoresCsv() {
   const fps = S.scores.fps, { lap, sob, cx, cy } = S.scores;
